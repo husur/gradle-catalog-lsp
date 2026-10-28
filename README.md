@@ -3,11 +3,11 @@
 Shows newer versions of the libraries and plugins declared in Gradle version catalogs
 (`gradle/libs.versions.toml`), right next to the version you use.
 
-```
+```toml
 [versions]
-agp = "9.4.1"  → 9.5.0
-kotlin = "2.4.20"  → 2.4.21
-lifecycle = "2.10.0"  → 2.11.0
+agp = "9.4.1"        # → 9.5.0
+kotlin = "2.4.20"    # → 2.4.21
+lifecycle = "2.10.0" # → 2.11.0
 ```
 
 Versions are looked up on Maven Central, Google Maven (androidx, Android Gradle Plugin, Firebase…)
