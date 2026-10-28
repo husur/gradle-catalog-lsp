@@ -67,3 +67,7 @@ cargo install --path server     # puts gradle-catalog-lsp in ~/.cargo/bin, which
 
 In Zed, run `zed: install dev extension` and pick this folder. After each change to the server,
 reinstall it and run `editor: restart language server`.
+
+## License
+
+Licensed under the [Apache License 2.0](LICENSE).
