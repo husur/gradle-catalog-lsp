@@ -99,7 +99,8 @@ fn entry(text: &str, value: &Value, modules: Vec<Module>) -> Option<Entry> {
     }
     let version_start = content.rfind(':').map_or(0, |colon| colon + 1);
     let version = &content[version_start..];
-    let dynamic = version.starts_with("latest.") || version.contains(['+', '[', ']', '(', ')', ',']);
+    let dynamic =
+        version.starts_with("latest.") || version.contains(['+', '[', ']', '(', ')', ',']);
     if version.is_empty() || dynamic {
         return None;
     }
@@ -139,7 +140,10 @@ ksp = "com.google.devtools.ksp:2.0.21-1.0.27"
             .into_iter()
             .map(|entry| {
                 assert_eq!(text[entry.span.clone()], entry.version);
-                let modules = entry.modules.iter().map(|m| format!("{}:{}", m.group, m.name));
+                let modules = entry
+                    .modules
+                    .iter()
+                    .map(|m| format!("{}:{}", m.group, m.name));
                 (&text[entry.span], modules.collect())
             })
             .collect();

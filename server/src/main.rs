@@ -12,10 +12,10 @@ use std::thread;
 use catalog::{Entry, Module};
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, Response};
 use lsp_types::{
-    CodeAction, CodeActionKind, CodeActionOrCommand, CodeActionParams, CodeActionProviderCapability,
-    DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams, InlayHint,
-    InlayHintLabel, InlayHintParams, InlayHintTooltip, OneOf, Position, Range, ServerCapabilities, TextDocumentSyncKind,
-    TextEdit, Uri, WorkspaceEdit,
+    CodeAction, CodeActionKind, CodeActionOrCommand, CodeActionParams,
+    CodeActionProviderCapability, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
+    DidOpenTextDocumentParams, InlayHint, InlayHintLabel, InlayHintParams, InlayHintTooltip, OneOf,
+    Position, Range, ServerCapabilities, TextDocumentSyncKind, TextEdit, Uri, WorkspaceEdit,
 };
 use serde_json::from_value;
 
@@ -51,14 +51,22 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     Ok(())
 }
 
-fn handle(connection: &Connection, documents: &HashMap<Uri, String>, cache: &Cache, request: Request) {
+fn handle(
+    connection: &Connection,
+    documents: &HashMap<Uri, String>,
+    cache: &Cache,
+    request: Request,
+) {
     let Request { id, method, params } = request;
     let response = match method.as_str() {
         "textDocument/inlayHint" => {
             let Ok(params) = from_value::<InlayHintParams>(params) else {
                 return invalid(connection, id);
             };
-            let text = documents.get(&params.text_document.uri).cloned().unwrap_or_default();
+            let text = documents
+                .get(&params.text_document.uri)
+                .cloned()
+                .unwrap_or_default();
             let (sender, cache) = (connection.sender.clone(), cache.clone());
             thread::spawn(move || {
                 let hints = inlay_hints(&text, &cache);
@@ -122,7 +130,9 @@ fn inlay_hints(text: &str, cache: &Cache) -> Vec<InlayHint> {
                 label: InlayHintLabel::String(format!("→ {latest}")),
                 kind: None,
                 text_edits: Some(vec![TextEdit::new(range(text, entry), latest.to_string())]),
-                tooltip: Some(InlayHintTooltip::String(format!("Double-click to update to {latest}"))),
+                tooltip: Some(InlayHintTooltip::String(format!(
+                    "Double-click to update to {latest}"
+                ))),
                 padding_left: Some(true),
                 padding_right: None,
                 data: None,
@@ -131,7 +141,11 @@ fn inlay_hints(text: &str, cache: &Cache) -> Vec<InlayHint> {
         .collect()
 }
 
-fn code_actions(documents: &HashMap<Uri, String>, cache: &Cache, params: CodeActionParams) -> Vec<CodeActionOrCommand> {
+fn code_actions(
+    documents: &HashMap<Uri, String>,
+    cache: &Cache,
+    params: CodeActionParams,
+) -> Vec<CodeActionOrCommand> {
     let uri = params.text_document.uri;
     let Some(text) = documents.get(&uri) else {
         return vec![];
@@ -190,7 +204,10 @@ fn update<'a>(entry: &Entry, cache: &'a HashMap<Module, Vec<String>>) -> Option<
 }
 
 fn range(text: &str, entry: &Entry) -> Range {
-    Range::new(position(text, entry.span.start), position(text, entry.span.end))
+    Range::new(
+        position(text, entry.span.start),
+        position(text, entry.span.end),
+    )
 }
 
 fn position(text: &str, offset: usize) -> Position {
