@@ -1,0 +1,67 @@
+name-template: 'v$RESOLVED_VERSION'
+tag-template: 'v$RESOLVED_VERSION'
+
+categories:
+  - title: '💥 Breaking changes'
+    labels: [breaking]
+  - title: '✨ Features'
+    labels: [feat]
+  - title: '🐛 Fixes'
+    labels: [fix]
+  - title: '♻️ Maintenance'
+    labels: [refactor, chore]
+  - title: '🧪 Tests'
+    labels: [test]
+  - title: '📚 Documentation'
+    labels: [docs]
+  - title: '⬆️ Dependencies'
+    collapse-after: 5
+    labels: [dependencies]
+
+exclude-labels:
+  - skip-changelog
+
+# GitHub does not autolink `#123` in a release body, so the link is spelled out.
+change-template: '- $TITLE ([#$NUMBER]($URL))'
+# A `<`, `_` or `&` in a pull request title would break the Markdown of the notes.
+change-title-escapes: '\<*_&'
+no-changes-template: '- No changes'
+
+# The category already tells the type, so the Conventional Commits prefix is dropped from each line.
+replacers:
+  - search: '/^- (?:feat|fix|refactor|perf|test|docs|chore|ci|build|style)(?:\([^)]*\))?!?: /gm'
+    replace: '- '
+
+version-resolver:
+  major:
+    labels: [breaking]
+  minor:
+    labels: [feat]
+  default: patch
+
+# Titles follow Conventional Commits (see CLAUDE.md); the branch name is a fallback while the title
+# is not compliant yet.
+autolabeler:
+  - label: breaking
+    title: ['/^[a-z]+(\([^)]*\))?!:/']
+  - label: feat
+    title: ['/^feat(\([^)]*\))?!?:/']
+    branch: ['/^(feat|feature)\//']
+  - label: fix
+    title: ['/^fix(\([^)]*\))?!?:/']
+    branch: ['/^fix\//']
+  - label: refactor
+    title: ['/^(refactor|perf)(\([^)]*\))?!?:/']
+    branch: ['/^(refactor|perf)\//']
+  - label: test
+    title: ['/^test(\([^)]*\))?!?:/']
+    branch: ['/^test\//']
+  - label: docs
+    title: ['/^docs(\([^)]*\))?!?:/']
+    branch: ['/^docs\//']
+  - label: chore
+    title: ['/^(chore|ci|build|style)(\([^)]*\))?!?:/']
+    branch: ['/^(chore|ci|build|style)\//']
+
+template: |
+  $CHANGES

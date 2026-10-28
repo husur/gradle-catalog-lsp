@@ -14,8 +14,9 @@ use lsp_server::{Connection, ErrorCode, Message, Notification, Request, Response
 use lsp_types::{
     CodeAction, CodeActionKind, CodeActionOrCommand, CodeActionParams,
     CodeActionProviderCapability, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
-    DidOpenTextDocumentParams, InlayHint, InlayHintLabel, InlayHintParams, InlayHintTooltip, OneOf,
-    Position, Range, ServerCapabilities, TextDocumentSyncKind, TextEdit, Uri, WorkspaceEdit,
+    DidOpenTextDocumentParams, InitializeResult, InlayHint, InlayHintLabel, InlayHintParams,
+    InlayHintTooltip, OneOf, Position, Range, ServerCapabilities, ServerInfo, TextDocumentSyncKind,
+    TextEdit, Uri, WorkspaceEdit,
 };
 use serde_json::from_value;
 
@@ -24,13 +25,20 @@ type Cache = Arc<Mutex<HashMap<Module, Vec<String>>>>;
 
 fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let (connection, io_threads) = Connection::stdio();
-    let capabilities = ServerCapabilities {
-        text_document_sync: Some(TextDocumentSyncKind::FULL.into()),
-        inlay_hint_provider: Some(OneOf::Left(true)),
-        code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
-        ..Default::default()
+    let (initialize_id, _) = connection.initialize_start()?;
+    let initialize_result = InitializeResult {
+        capabilities: ServerCapabilities {
+            text_document_sync: Some(TextDocumentSyncKind::FULL.into()),
+            inlay_hint_provider: Some(OneOf::Left(true)),
+            code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
+            ..Default::default()
+        },
+        server_info: Some(ServerInfo {
+            name: env!("CARGO_PKG_NAME").to_string(),
+            version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        }),
     };
-    connection.initialize(serde_json::to_value(capabilities)?)?;
+    connection.initialize_finish(initialize_id, serde_json::to_value(initialize_result)?)?;
 
     let mut documents: HashMap<Uri, String> = HashMap::new();
     let cache = Cache::default();

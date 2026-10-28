@@ -1,0 +1,50 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+  # Builds every target, without publishing anything, when this workflow changes.
+  pull_request:
+    paths: [.github/workflows/release.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  binaries:
+    strategy:
+      matrix:
+        include:
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          - { os: macos-latest, target: x86_64-apple-darwin }
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Take the version from the release tag
+        if: github.event_name == 'release'
+        run: |
+          sed -i.bak "s/^version = \".*\"$/version = \"${GITHUB_REF_NAME#v}\"/" server/Cargo.toml
+          cargo update --workspace
+      - if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: cargo build --release --locked -p gradle-catalog-lsp --target ${{ matrix.target }}
+      - run: |
+          binary=target/${{ matrix.target }}/release/gradle-catalog-lsp${{ runner.os == 'Windows' && '.exe' || '' }}
+          gzip -c "$binary" > gradle-catalog-lsp-${{ matrix.target }}.gz
+      - if: github.event_name == 'release'
+        run: gh release upload "$GITHUB_REF_NAME" gradle-catalog-lsp-${{ matrix.target }}.gz --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}

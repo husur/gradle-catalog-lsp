@@ -1,6 +1,7 @@
 [package]
 name = "gradle-catalog-lsp"
-version = "0.1.0"
+# Set from the release tag when building a release, see .github/workflows/release.yml.
+version = "0.0.0"
 edition = "2024"
 license = "Apache-2.0"
 

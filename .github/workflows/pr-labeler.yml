@@ -1,0 +1,22 @@
+name: PR labeler
+
+on:
+  # pull_request_target lets the job label pull requests from forks. It is safe because the job
+  # never checks out nor runs their code: the rules only read the title and the branch, which is
+  # also why a push (`synchronize`) does not need to trigger it.
+  pull_request_target:
+    types: [opened, reopened, edited]
+
+permissions:
+  contents: read
+
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    permissions:
+      # Job permissions replace the workflow ones: without `contents`, the action cannot read
+      # `.github/release-drafter.yml`.
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: release-drafter/release-drafter/autolabeler@978bb0b30c5ee8cdd332ced253758157150d43f0 # v7.10.0
