@@ -1,7 +1,7 @@
 # gradle-catalog-lsp
 
-The repository is meant to go public and be used by anyone, so everything written in it is in
-**English**: commits, PRs, issues, README, code comments, this file. Commits follow conventional
-commits (`feat: …`, imperative mood), and their body carries the why.
-
-Replies to Hugo in the conversation stay in French (see `~/Perso/CLAUDE.md`).
+- Everything written in the repository is in English: code, comments, docs, commits, PRs, issues.
+- Commits follow [Conventional Commits](https://www.conventionalcommits.org): `type(scope): description`
+  in the imperative mood, with a body that explains why.
+- Run the tests with `cargo test --workspace`: a plain `cargo test` at the root only tests the Zed
+  extension crate, which has no tests.
