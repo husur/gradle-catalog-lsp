@@ -28,6 +28,8 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: Check that the tag matches the server version
         if: github.event_name == 'release'
         run: |
@@ -36,7 +38,7 @@ jobs:
             echo "::error::Tag $GITHUB_REF_NAME does not match version $version of server/Cargo.toml"
             exit 1
           fi
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           targets: ${{ matrix.target }}
       - if: contains(matrix.target, 'musl')
