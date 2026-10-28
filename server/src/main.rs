@@ -14,7 +14,7 @@ use lsp_server::{Connection, ErrorCode, Message, Notification, Request, Response
 use lsp_types::{
     CodeAction, CodeActionKind, CodeActionOrCommand, CodeActionParams, CodeActionProviderCapability,
     DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams, InlayHint,
-    InlayHintLabel, InlayHintParams, OneOf, Position, Range, ServerCapabilities, TextDocumentSyncKind,
+    InlayHintLabel, InlayHintParams, InlayHintTooltip, OneOf, Position, Range, ServerCapabilities, TextDocumentSyncKind,
     TextEdit, Uri, WorkspaceEdit,
 };
 use serde_json::from_value;
@@ -122,7 +122,7 @@ fn inlay_hints(text: &str, cache: &Cache) -> Vec<InlayHint> {
                 label: InlayHintLabel::String(format!("→ {latest}")),
                 kind: None,
                 text_edits: Some(vec![TextEdit::new(range(text, entry), latest.to_string())]),
-                tooltip: None,
+                tooltip: Some(InlayHintTooltip::String(format!("Double-click to update to {latest}"))),
                 padding_left: Some(true),
                 padding_right: None,
                 data: None,
