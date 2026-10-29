@@ -61,9 +61,13 @@ Then make sure that:
 To work on it, install Rust with [rustup](https://rustup.rs), then:
 
 ```sh
-cargo test --workspace          # unit tests
+cargo test --workspace          # all the tests
 cargo install --path server     # puts gradle-catalog-lsp in ~/.cargo/bin, which must be in your PATH
 ```
+
+The CI also requires 90% line coverage of the server, measured with
+[cargo-llvm-cov](https://github.com/taiki-e/cargo-llvm-cov):
+`cargo llvm-cov --workspace --exclude-from-report gradle-catalog-zed`.
 
 In Zed, run `zed: install dev extension` and pick this folder. After each change to the server,
 reinstall it and run `editor: restart language server`.
