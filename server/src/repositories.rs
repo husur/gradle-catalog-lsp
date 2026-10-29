@@ -121,11 +121,22 @@ pub fn fetch(module: &Module) -> Vec<String> {
         .into_iter()
         .flatten()
         .find_map(|repository| {
-            let mut request = AGENT.get(format!("{}/{path}", repository.url));
+            let url = format!("{}/{path}", repository.url);
+            let mut request = AGENT.get(&url);
             if let Some(authorization) = &repository.authorization {
                 request = request.header("Authorization", authorization);
             }
-            request.call().ok()?.body_mut().read_to_string().ok()
+            request
+                .call()
+                .and_then(|mut response| response.body_mut().read_to_string())
+                // Zed shows stderr in the language server logs. A 404 only means that the module
+                // lives in another repository.
+                .inspect_err(|error| {
+                    if !matches!(error, ureq::Error::StatusCode(404)) {
+                        eprintln!("{url}: {error}");
+                    }
+                })
+                .ok()
         })
         .map(|metadata| {
             metadata
