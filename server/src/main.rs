@@ -2,9 +2,12 @@
 #![allow(clippy::mutable_key_type)]
 
 use std::collections::{HashMap, HashSet};
+use std::env;
 use std::error::Error;
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::thread;
+use std::time::{Duration, SystemTime};
 
 use gradle_catalog_lsp::catalog::{self, Entry, Module};
 use gradle_catalog_lsp::versions;
@@ -12,18 +15,54 @@ use lsp_server::{Connection, ErrorCode, Message, Notification, Request, Response
 use lsp_types::{
     CodeAction, CodeActionKind, CodeActionOrCommand, CodeActionParams,
     CodeActionProviderCapability, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
-    DidOpenTextDocumentParams, InitializeResult, InlayHint, InlayHintLabel, InlayHintParams,
-    InlayHintTooltip, OneOf, Position, Range, ServerCapabilities, ServerInfo, TextDocumentSyncKind,
-    TextEdit, Uri, WorkspaceEdit,
+    DidOpenTextDocumentParams, InitializeParams, InitializeResult, InlayHint, InlayHintLabel,
+    InlayHintParams, InlayHintTooltip, OneOf, Position, Range, ServerCapabilities, ServerInfo,
+    TextDocumentSyncKind, TextEdit, Uri, WorkspaceEdit,
 };
 use serde_json::from_value;
 
-// ponytail: versions stay cached until the server restarts, add a TTL if long sessions miss releases
-type Cache = Arc<Mutex<HashMap<Module, Vec<String>>>>;
+const FOUND_TTL: Duration = Duration::from_secs(60 * 60);
+const MISSING_TTL: Duration = Duration::from_secs(5 * 60);
+const REFRESH_PERIOD: Duration = Duration::from_secs(5 * 60);
+
+/// The tests shorten the expiries and the refresh period to `GRADLE_CATALOG_LSP_TTL_MS`
+/// milliseconds.
+static TEST_DELAY: LazyLock<Option<Duration>> = LazyLock::new(|| {
+    let millis = env::var("GRADLE_CATALOG_LSP_TTL_MS").ok()?.parse().ok()?;
+    Some(Duration::from_millis(millis))
+});
+
+fn delay(default: Duration) -> Duration {
+    TEST_DELAY.unwrap_or(default)
+}
+
+struct Fetched {
+    versions: Vec<String>,
+    // Not an `Instant`, which stops while a Mac sleeps: a night away would not count.
+    at: SystemTime,
+}
+
+impl Fetched {
+    /// A clock set back since the fetch makes it stale.
+    fn fresh(&self) -> bool {
+        let ttl = if self.versions.is_empty() {
+            MISSING_TTL
+        } else {
+            FOUND_TTL
+        };
+        self.at.elapsed().is_ok_and(|age| age < delay(ttl))
+    }
+}
+
+type Cache = Arc<Mutex<HashMap<Module, Fetched>>>;
 
 fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let (connection, io_threads) = Connection::stdio();
-    let (initialize_id, _) = connection.initialize_start()?;
+    let (initialize_id, initialize_params) = connection.initialize_start()?;
+    let refresh_support = from_value::<InitializeParams>(initialize_params)
+        .ok()
+        .and_then(|params| params.capabilities.workspace?.inlay_hint?.refresh_support)
+        .unwrap_or(false);
     let initialize_result = InitializeResult {
         capabilities: ServerCapabilities {
             text_document_sync: Some(TextDocumentSyncKind::FULL.into()),
@@ -37,6 +76,21 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         }),
     };
     connection.initialize_finish(initialize_id, serde_json::to_value(initialize_result)?)?;
+
+    // Zed only asks for hints on open, edit and scroll, so a catalog left open would never show a
+    // release. The thread holds a sender, which `io_threads.join()` waits for: dropping `stop` ends it.
+    let (stop, stopped) = mpsc::channel::<()>();
+    if refresh_support {
+        let sender = connection.sender.clone();
+        thread::spawn(move || {
+            let mut id = 0;
+            while let Err(RecvTimeoutError::Timeout) = stopped.recv_timeout(delay(REFRESH_PERIOD)) {
+                id += 1;
+                let refresh = Request::new(id.into(), "workspace/inlayHint/refresh".into(), ());
+                let _ = sender.send(refresh.into());
+            }
+        });
+    }
 
     let mut documents: HashMap<Uri, String> = HashMap::new();
     let cache = Cache::default();
@@ -53,6 +107,7 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         }
     }
     drop(connection);
+    drop(stop);
     io_threads.join()?;
     Ok(())
 }
@@ -198,19 +253,29 @@ fn changes(uri: &Uri, edits: Vec<TextEdit>) -> WorkspaceEdit {
 }
 
 fn resolve(entries: &[Entry], cache: &Cache) {
-    let missing: HashSet<&Module> = {
+    let stale: HashSet<&Module> = {
         let cache = cache.lock().unwrap();
         entries
             .iter()
             .flat_map(|entry| &entry.modules)
-            .filter(|module| !cache.contains_key(*module))
+            .filter(|module| !cache.get(*module).is_some_and(Fetched::fresh))
             .collect()
     };
     thread::scope(|scope| {
-        for module in missing {
+        for module in stale {
             scope.spawn(move || {
-                let available = versions::fetch(module);
-                cache.lock().unwrap().insert(module.clone(), available);
+                let fetched = Fetched {
+                    versions: versions::fetch(module),
+                    at: SystemTime::now(),
+                };
+                let mut cache = cache.lock().unwrap();
+                match cache.get_mut(module) {
+                    // Offline, the hints stay rather than disappear.
+                    Some(known) if fetched.versions.is_empty() => known.at = fetched.at,
+                    _ => {
+                        cache.insert(module.clone(), fetched);
+                    }
+                }
             });
         }
     });
@@ -218,12 +283,16 @@ fn resolve(entries: &[Entry], cache: &Cache) {
 
 /// A shared `version.ref` only moves when every module it pins has a newer
 /// version, and then only as far as the slowest one.
-fn update<'a>(entry: &Entry, cache: &'a HashMap<Module, Vec<String>>) -> Option<&'a str> {
+fn update<'a>(entry: &Entry, cache: &'a HashMap<Module, Fetched>) -> Option<&'a str> {
     let latests: Option<Vec<&str>> = entry
         .modules
         .iter()
-        .filter_map(|module| cache.get(module).filter(|available| !available.is_empty()))
-        .map(|available| versions::latest(&entry.version, available))
+        .filter_map(|module| {
+            cache
+                .get(module)
+                .filter(|fetched| !fetched.versions.is_empty())
+        })
+        .map(|fetched| versions::latest(&entry.version, &fetched.versions))
         .collect();
     latests?.into_iter().min_by(|a, b| versions::compare(a, b))
 }

@@ -50,8 +50,8 @@ Then make sure that:
 - Rich versions (`strictly`, `require`, `prefer`, `reject`) and dynamic ones (`1.+`, ranges,
   `latest.release`) are skipped.
 - Coordinates written directly in `build.gradle(.kts)` are not read, only catalogs.
-- Versions are fetched once per session. To pick up a release published since, or after a network
-  error, run `editor: restart language server`.
+- A new release can take up to an hour to show, and a module that could not be found, offline for
+  instance, is looked up again after 5 minutes.
 
 ## Contributing
 
