@@ -18,6 +18,7 @@ Gradle. For `pom.xml` and other ecosystems, see [Depsy](https://github.com/mpito
 
 - **Double-click the hint** (Zed 1.25.2 or later), or put the cursor on it and run `editor: accept inlay hint`.
 - Or open the code actions on the line and pick **Update to x.y.z**.
+- To apply every update of the catalog at once, pick **Update all N versions** in the same menu.
 
 ## Installation
 
