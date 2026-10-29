@@ -17,6 +17,6 @@ jobs:
         with:
           tool: cargo-llvm-cov
       # Runs the tests of the whole workspace, but the Zed extension stays out of the report: it only
-      # runs inside Zed. The threshold is the measured line coverage rounded down: raise it when
-      # tests are added, never lower it.
-      - run: cargo llvm-cov --workspace --exclude-from-report gradle-catalog-zed --fail-under-lines 38
+      # runs inside Zed. The server sits near 99%, and the threshold leaves some room under it so a
+      # single unreachable branch does not fail the build. Never lower it.
+      - run: cargo llvm-cov --workspace --exclude-from-report gradle-catalog-zed --fail-under-lines 90
