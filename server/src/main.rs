@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::env;
 use std::error::Error;
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
@@ -27,13 +27,11 @@ const REFRESH_PERIOD: Duration = Duration::from_secs(5 * 60);
 
 /// The tests shorten the expiries and the refresh period to `GRADLE_CATALOG_LSP_TTL_MS`
 /// milliseconds.
-static TEST_DELAY: LazyLock<Option<Duration>> = LazyLock::new(|| {
-    let millis = env::var("GRADLE_CATALOG_LSP_TTL_MS").ok()?.parse().ok()?;
-    Some(Duration::from_millis(millis))
-});
-
 fn delay(default: Duration) -> Duration {
-    TEST_DELAY.unwrap_or(default)
+    env::var("GRADLE_CATALOG_LSP_TTL_MS")
+        .ok()
+        .and_then(|millis| millis.parse().ok())
+        .map_or(default, Duration::from_millis)
 }
 
 struct Fetched {

@@ -47,8 +47,7 @@ to the server, reinstall it and run `editor: restart language server`.
   history.
 - The pull request title follows the same format. Its type picks the label that files the change in
   the release notes and sets the next version (`feat` bumps the minor, a `!` after the type the
-  major). The branch prefix adds a label too, so name the branch after the same type: `fix/…` for a
-  `fix:` title.
+  major).
 - Answer review comments with new commits rather than rewriting the history.
 
 ## Releasing

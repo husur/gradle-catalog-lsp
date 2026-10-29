@@ -74,19 +74,10 @@ fn qualifiers(version: &str) -> Vec<String> {
 }
 
 fn tokens(version: &str) -> Vec<String> {
-    let mut tokens: Vec<String> = vec![];
-    let mut previous_digit = None;
-    for c in version.to_lowercase().chars() {
-        if matches!(c, '.' | '-' | '_' | '+') {
-            previous_digit = None;
-            continue;
-        }
-        let digit = c.is_ascii_digit();
-        match tokens.last_mut() {
-            Some(token) if previous_digit == Some(digit) => token.push(c),
-            _ => tokens.push(c.to_string()),
-        }
-        previous_digit = Some(digit);
-    }
-    tokens
+    let chars: Vec<char> = version.to_lowercase().chars().collect();
+    chars
+        .split(|c| matches!(c, '.' | '-' | '_' | '+'))
+        .flat_map(|piece| piece.chunk_by(|a, b| a.is_ascii_digit() == b.is_ascii_digit()))
+        .map(|token| token.iter().collect())
+        .collect()
 }

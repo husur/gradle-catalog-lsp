@@ -63,16 +63,8 @@ struct Repository {
 }
 
 impl Repository {
-    fn new(artifacts: Artifacts) -> Self {
-        Self::serve(artifacts, None)
-    }
-
-    /// Answers 401 to requests without this `Authorization` header.
-    fn secured(artifacts: Artifacts, authorization: &'static str) -> Self {
-        Self::serve(artifacts, Some(authorization))
-    }
-
-    fn serve(artifacts: Artifacts, authorization: Option<&'static str>) -> Self {
+    /// Answers 401 to requests without the `authorization` header, when there is one.
+    fn new(artifacts: Artifacts, authorization: Option<&'static str>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let repository = Self {
             url: format!("http://{}", listener.local_addr().unwrap()),
@@ -186,8 +178,8 @@ impl Server {
     }
 
     fn start() -> Self {
-        let first = Repository::new(FIRST_REPOSITORY);
-        let second = Repository::new(SECOND_REPOSITORY);
+        let first = Repository::new(FIRST_REPOSITORY, None);
+        let second = Repository::new(SECOND_REPOSITORY, None);
         Self::start_with(&[&first, &second], json!({}))
     }
 
@@ -469,8 +461,11 @@ fn exits_after_shutdown() {
 
 #[test]
 fn shows_a_release_published_since_the_last_lookup_once_it_expires() {
-    let first = Repository::new(FIRST_REPOSITORY);
-    let mut server = Server::start_with(&[&first, &Repository::new(SECOND_REPOSITORY)], json!({}));
+    let first = Repository::new(FIRST_REPOSITORY, None);
+    let mut server = Server::start_with(
+        &[&first, &Repository::new(SECOND_REPOSITORY, None)],
+        json!({}),
+    );
     assert_eq!(server.labels(), ["→ 4.12.0", "→ 2.1.0"]);
     first.publish("androidx/core/core-ktx", &["1.12.0", "1.13.1", "1.15.0"]);
     first.publish("com/example/missing", &["1.0", "1.1"]);
@@ -483,8 +478,8 @@ fn shows_a_release_published_since_the_last_lookup_once_it_expires() {
 
 #[test]
 fn keeps_the_known_versions_when_the_repositories_stop_answering() {
-    let first = Repository::new(FIRST_REPOSITORY);
-    let second = Repository::new(SECOND_REPOSITORY);
+    let first = Repository::new(FIRST_REPOSITORY, None);
+    let second = Repository::new(SECOND_REPOSITORY, None);
     let mut server = Server::start_with(&[&first, &second], json!({}));
     assert_eq!(server.labels(), ["→ 4.12.0", "→ 2.1.0"]);
     first.empty();
@@ -496,7 +491,7 @@ fn keeps_the_known_versions_when_the_repositories_stop_answering() {
 #[test]
 fn asks_zed_to_refresh_the_hints_when_it_supports_it() {
     let refresh_support = json!({ "workspace": { "inlayHint": { "refreshSupport": true } } });
-    let first = Repository::new(FIRST_REPOSITORY);
+    let first = Repository::new(FIRST_REPOSITORY, None);
     let mut server = Server::start_with(&[&first], refresh_support);
     thread::sleep(TTL * 3);
     server.hints(CATALOG_URI);
@@ -531,12 +526,15 @@ fn never_asks_a_client_without_refresh_support() {
 
 #[test]
 fn queries_the_configured_repositories_before_the_default_ones() {
-    let first = Repository::new(FIRST_REPOSITORY);
-    let second = Repository::new(SECOND_REPOSITORY);
-    let private = Repository::new(&[
-        ("com/example/missing", &["1.0", "1.1"]),
-        ("com/squareup/okhttp3/okhttp", &["4.11.0", "4.13.0"]),
-    ]);
+    let first = Repository::new(FIRST_REPOSITORY, None);
+    let second = Repository::new(SECOND_REPOSITORY, None);
+    let private = Repository::new(
+        &[
+            ("com/example/missing", &["1.0", "1.1"]),
+            ("com/squareup/okhttp3/okhttp", &["4.11.0", "4.13.0"]),
+        ],
+        None,
+    );
     let configured = json!([{ "url": private.url }]);
     let mut server = Server::configured(&[&first, &second], &[], configured);
     // The second repository has okhttp too, up to 4.12.0.
@@ -556,9 +554,9 @@ fn authenticates_with_the_credentials_gradle_would_use() {
     let other_home = gradle_home("properties", properties);
     let properties = [("GRADLE_USER_HOME", other_home.to_str().unwrap())];
     for env in [&environment[..], &properties[..]] {
-        let first = Repository::new(FIRST_REPOSITORY);
-        let second = Repository::new(SECOND_REPOSITORY);
-        let private = Repository::secured(PRIVATE_REPOSITORY, AUTHORIZATION);
+        let first = Repository::new(FIRST_REPOSITORY, None);
+        let second = Repository::new(SECOND_REPOSITORY, None);
+        let private = Repository::new(PRIVATE_REPOSITORY, Some(AUTHORIZATION));
         let configured = json!([{ "url": private.url, "credentials": "acme" }]);
         let mut server = Server::configured(&[&first, &second], env, configured);
         assert_eq!(server.labels(), ["→ 4.12.0", "→ 1.1", "→ 2.1.0"]);
@@ -572,9 +570,9 @@ fn authenticates_with_the_credentials_gradle_would_use() {
 #[test]
 fn skips_a_repository_whose_credentials_are_missing() {
     let home = gradle_home("missing", "");
-    let first = Repository::new(FIRST_REPOSITORY);
-    let second = Repository::new(SECOND_REPOSITORY);
-    let private = Repository::secured(PRIVATE_REPOSITORY, AUTHORIZATION);
+    let first = Repository::new(FIRST_REPOSITORY, None);
+    let second = Repository::new(SECOND_REPOSITORY, None);
+    let private = Repository::new(PRIVATE_REPOSITORY, Some(AUTHORIZATION));
     let configured = json!([{ "url": private.url, "credentials": "acme" }]);
     let env = [("GRADLE_USER_HOME", home.to_str().unwrap())];
     let mut server = Server::configured(&[&first, &second], &env, configured);
@@ -585,10 +583,10 @@ fn skips_a_repository_whose_credentials_are_missing() {
 
 #[test]
 fn ignores_invalid_entries_and_credentials_written_in_urls() {
-    let first = Repository::new(FIRST_REPOSITORY);
-    let second = Repository::new(SECOND_REPOSITORY);
-    let exposed = Repository::new(&[("com/example/missing", &["1.0", "9.9"])]);
-    let private = Repository::new(PRIVATE_REPOSITORY);
+    let first = Repository::new(FIRST_REPOSITORY, None);
+    let second = Repository::new(SECOND_REPOSITORY, None);
+    let exposed = Repository::new(&[("com/example/missing", &["1.0", "9.9"])], None);
+    let private = Repository::new(PRIVATE_REPOSITORY, None);
     let configured = json!([
         { "url": exposed.url.replace("http://", "http://acme:s3cr3t@") },
         { "url": 42 },
