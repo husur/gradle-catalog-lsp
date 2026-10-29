@@ -1,10 +1,16 @@
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 use std::process::{Child, ChildStdout, Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
 use lsp_server::{Message, Notification, Request, RequestId, ResponseError};
 use serde_json::{Value, json};
+
+/// Versions expire after this delay.
+const TTL: Duration = Duration::from_millis(200);
 
 const CATALOG_URI: &str = "file:///project/gradle/libs.versions.toml";
 
@@ -43,44 +49,68 @@ const SECOND_REPOSITORY: Artifacts = &[
 ];
 
 /// Serves `maven-metadata.xml` like a Maven repository, and 404 for anything else.
-fn repository(artifacts: Artifacts) -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
-    thread::spawn(move || {
-        for mut stream in listener.incoming().flatten() {
-            let request: Vec<String> = BufReader::new(&stream)
-                .lines()
-                .map_while(Result::ok)
-                .take_while(|line| !line.is_empty())
-                .collect();
-            let path = request
-                .first()
-                .and_then(|line| line.split(' ').nth(1))
-                .unwrap_or_default();
-            let found = artifacts
-                .iter()
-                .find(|(artifact, _)| path == format!("/{artifact}/maven-metadata.xml"));
-            let response = match found {
-                Some((_, versions)) => {
-                    let versions: String = versions
-                        .iter()
-                        .map(|version| format!("<version>{version}</version>"))
-                        .collect();
-                    let body = format!(
-                        "<metadata><versioning><versions>{versions}</versions></versioning></metadata>"
-                    );
-                    format!(
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                        body.len()
-                    )
-                }
-                None => "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                    .to_string(),
-            };
-            let _ = stream.write_all(response.as_bytes());
+struct Repository {
+    url: String,
+    artifacts: Arc<Mutex<HashMap<String, Vec<String>>>>,
+}
+
+impl Repository {
+    fn new(artifacts: Artifacts) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let repository = Self {
+            url: format!("http://{}", listener.local_addr().unwrap()),
+            artifacts: Arc::default(),
+        };
+        for (artifact, versions) in artifacts {
+            repository.publish(artifact, versions);
         }
-    });
-    url
+        let served = Arc::clone(&repository.artifacts);
+        thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let request: Vec<String> = BufReader::new(&stream)
+                    .lines()
+                    .map_while(Result::ok)
+                    .take_while(|line| !line.is_empty())
+                    .collect();
+                let path = request
+                    .first()
+                    .and_then(|line| line.split(' ').nth(1))
+                    .unwrap_or_default();
+                let response = match served.lock().unwrap().get(path) {
+                    Some(versions) => {
+                        let versions: String = versions
+                            .iter()
+                            .map(|version| format!("<version>{version}</version>"))
+                            .collect();
+                        let body = format!(
+                            "<metadata><versioning><versions>{versions}</versions></versioning></metadata>"
+                        );
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                    }
+                    None => {
+                        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                            .to_string()
+                    }
+                };
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        repository
+    }
+
+    fn publish(&self, artifact: &str, versions: &[&str]) {
+        self.artifacts.lock().unwrap().insert(
+            format!("/{artifact}/maven-metadata.xml"),
+            versions.iter().map(|v| v.to_string()).collect(),
+        );
+    }
+
+    fn empty(&self) {
+        self.artifacts.lock().unwrap().clear();
+    }
 }
 
 /// The language server binary, driven over stdio like Zed does.
@@ -91,9 +121,11 @@ struct Server {
 }
 
 impl Server {
-    fn spawn(repositories: &[String]) -> Self {
+    fn spawn(repositories: &[&Repository]) -> Self {
+        let urls: Vec<&str> = repositories.iter().map(|r| r.url.as_str()).collect();
         let mut process = Command::new(env!("CARGO_BIN_EXE_gradle-catalog-lsp"))
-            .env("GRADLE_CATALOG_LSP_REPOSITORIES", repositories.join(","))
+            .env("GRADLE_CATALOG_LSP_REPOSITORIES", urls.join(","))
+            .env("GRADLE_CATALOG_LSP_TTL_MS", TTL.as_millis().to_string())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
@@ -107,8 +139,13 @@ impl Server {
     }
 
     fn start() -> Self {
-        let mut server =
-            Self::spawn(&[repository(FIRST_REPOSITORY), repository(SECOND_REPOSITORY)]);
+        let first = Repository::new(FIRST_REPOSITORY);
+        let second = Repository::new(SECOND_REPOSITORY);
+        Self::start_with(&[&first, &second])
+    }
+
+    fn start_with(repositories: &[&Repository]) -> Self {
+        let mut server = Self::spawn(repositories);
         server.initialize();
         server.open(CATALOG_URI, CATALOG);
         server
@@ -170,6 +207,15 @@ impl Server {
             }),
         )
         .unwrap()
+    }
+
+    fn labels(&mut self) -> Vec<String> {
+        let hints = self.hints(CATALOG_URI);
+        let hints = hints.as_array().unwrap();
+        hints
+            .iter()
+            .map(|hint| hint["label"].as_str().unwrap().to_string())
+            .collect()
     }
 }
 
@@ -324,4 +370,30 @@ fn exits_after_shutdown() {
     );
     server.notify("exit", Value::Null);
     assert!(server.process.wait().unwrap().success());
+}
+
+#[test]
+fn shows_a_release_published_since_the_last_lookup_once_it_expires() {
+    let first = Repository::new(FIRST_REPOSITORY);
+    let mut server = Server::start_with(&[&first, &Repository::new(SECOND_REPOSITORY)]);
+    assert_eq!(server.labels(), ["→ 4.12.0", "→ 2.1.0"]);
+    first.publish("androidx/core/core-ktx", &["1.12.0", "1.13.1", "1.15.0"]);
+    first.publish("com/example/missing", &["1.0", "1.1"]);
+    thread::sleep(TTL);
+    assert_eq!(
+        server.labels(),
+        ["→ 4.12.0", "→ 1.15.0", "→ 1.1", "→ 2.1.0"]
+    );
+}
+
+#[test]
+fn keeps_the_known_versions_when_the_repositories_stop_answering() {
+    let first = Repository::new(FIRST_REPOSITORY);
+    let second = Repository::new(SECOND_REPOSITORY);
+    let mut server = Server::start_with(&[&first, &second]);
+    assert_eq!(server.labels(), ["→ 4.12.0", "→ 2.1.0"]);
+    first.empty();
+    second.empty();
+    thread::sleep(TTL);
+    assert_eq!(server.labels(), ["→ 4.12.0", "→ 2.1.0"]);
 }
