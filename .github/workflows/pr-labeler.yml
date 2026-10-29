@@ -12,6 +12,9 @@ permissions:
 
 jobs:
   label:
+    # Dependabot already sets `dependencies`, and its `chore(deps)` titles would also earn `chore`:
+    # Release Drafter lists a pull request under every category it matches, so it would show twice.
+    if: github.event.pull_request.user.login != 'dependabot[bot]'
     runs-on: ubuntu-latest
     permissions:
       # Job permissions replace the workflow ones: without `contents`, the action cannot read
