@@ -4,6 +4,7 @@
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::error::Error;
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime};
@@ -14,16 +15,18 @@ use lsp_server::{Connection, ErrorCode, Message, Notification, Request, Response
 use lsp_types::{
     CodeAction, CodeActionKind, CodeActionOrCommand, CodeActionParams,
     CodeActionProviderCapability, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
-    DidOpenTextDocumentParams, InitializeResult, InlayHint, InlayHintLabel, InlayHintParams,
-    InlayHintTooltip, OneOf, Position, Range, ServerCapabilities, ServerInfo, TextDocumentSyncKind,
-    TextEdit, Uri, WorkspaceEdit,
+    DidOpenTextDocumentParams, InitializeParams, InitializeResult, InlayHint, InlayHintLabel,
+    InlayHintParams, InlayHintTooltip, OneOf, Position, Range, ServerCapabilities, ServerInfo,
+    TextDocumentSyncKind, TextEdit, Uri, WorkspaceEdit,
 };
 use serde_json::from_value;
 
 const FOUND_TTL: Duration = Duration::from_secs(60 * 60);
 const MISSING_TTL: Duration = Duration::from_secs(5 * 60);
+const REFRESH_PERIOD: Duration = Duration::from_secs(5 * 60);
 
-/// The tests shorten the expiries to `GRADLE_CATALOG_LSP_TTL_MS` milliseconds.
+/// The tests shorten the expiries and the refresh period to `GRADLE_CATALOG_LSP_TTL_MS`
+/// milliseconds.
 static TEST_DELAY: LazyLock<Option<Duration>> = LazyLock::new(|| {
     let millis = env::var("GRADLE_CATALOG_LSP_TTL_MS").ok()?.parse().ok()?;
     Some(Duration::from_millis(millis))
@@ -55,7 +58,11 @@ type Cache = Arc<Mutex<HashMap<Module, Fetched>>>;
 
 fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let (connection, io_threads) = Connection::stdio();
-    let (initialize_id, _) = connection.initialize_start()?;
+    let (initialize_id, initialize_params) = connection.initialize_start()?;
+    let refresh_support = from_value::<InitializeParams>(initialize_params)
+        .ok()
+        .and_then(|params| params.capabilities.workspace?.inlay_hint?.refresh_support)
+        .unwrap_or(false);
     let initialize_result = InitializeResult {
         capabilities: ServerCapabilities {
             text_document_sync: Some(TextDocumentSyncKind::FULL.into()),
@@ -69,6 +76,21 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         }),
     };
     connection.initialize_finish(initialize_id, serde_json::to_value(initialize_result)?)?;
+
+    // Zed only asks for hints on open, edit and scroll, so a catalog left open would never show a
+    // release. The thread holds a sender, which `io_threads.join()` waits for: dropping `stop` ends it.
+    let (stop, stopped) = mpsc::channel::<()>();
+    if refresh_support {
+        let sender = connection.sender.clone();
+        thread::spawn(move || {
+            let mut id = 0;
+            while let Err(RecvTimeoutError::Timeout) = stopped.recv_timeout(delay(REFRESH_PERIOD)) {
+                id += 1;
+                let refresh = Request::new(id.into(), "workspace/inlayHint/refresh".into(), ());
+                let _ = sender.send(refresh.into());
+            }
+        });
+    }
 
     let mut documents: HashMap<Uri, String> = HashMap::new();
     let cache = Cache::default();
@@ -85,6 +107,7 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         }
     }
     drop(connection);
+    drop(stop);
     io_threads.join()?;
     Ok(())
 }

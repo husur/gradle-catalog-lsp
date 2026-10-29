@@ -1,15 +1,15 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
-use std::process::{Child, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use lsp_server::{Message, Notification, Request, RequestId, ResponseError};
+use lsp_server::{Message, Notification, Request, RequestId, Response, ResponseError};
 use serde_json::{Value, json};
 
-/// Versions expire after this delay.
+/// Versions expire, and the server asks for a refresh, after this delay.
 const TTL: Duration = Duration::from_millis(200);
 
 const CATALOG_URI: &str = "file:///project/gradle/libs.versions.toml";
@@ -118,6 +118,8 @@ struct Server {
     process: Child,
     output: BufReader<ChildStdout>,
     next_id: i32,
+    /// Methods of the requests the server sent, which are answered like Zed does.
+    requests: Vec<String>,
 }
 
 impl Server {
@@ -135,25 +137,26 @@ impl Server {
             process,
             output,
             next_id: 0,
+            requests: vec![],
         }
     }
 
     fn start() -> Self {
         let first = Repository::new(FIRST_REPOSITORY);
         let second = Repository::new(SECOND_REPOSITORY);
-        Self::start_with(&[&first, &second])
+        Self::start_with(&[&first, &second], json!({}))
     }
 
-    fn start_with(repositories: &[&Repository]) -> Self {
+    fn start_with(repositories: &[&Repository], capabilities: Value) -> Self {
         let mut server = Self::spawn(repositories);
-        server.initialize();
+        server.initialize(capabilities);
         server.open(CATALOG_URI, CATALOG);
         server
     }
 
-    fn initialize(&mut self) -> Value {
+    fn initialize(&mut self, capabilities: Value) -> Value {
         let result = self
-            .request("initialize", json!({ "capabilities": {} }))
+            .request("initialize", json!({ "capabilities": capabilities }))
             .unwrap();
         self.notify("initialized", json!({}));
         result
@@ -167,6 +170,10 @@ impl Server {
             match Message::read(&mut self.output).unwrap() {
                 Some(Message::Response(response)) if response.id == id => {
                     return response.response_result;
+                }
+                Some(Message::Request(request)) => {
+                    self.requests.push(request.method);
+                    self.send(Response::new_ok(request.id, ()).into());
                 }
                 Some(_) => {}
                 None => panic!("the server stopped before answering {method}"),
@@ -217,13 +224,26 @@ impl Server {
             .map(|hint| hint["label"].as_str().unwrap().to_string())
             .collect()
     }
+
+    /// Gives up after a few seconds, so that a server that hangs fails the test instead of blocking it.
+    fn exited(&mut self) -> Option<ExitStatus> {
+        for _ in 0..500 {
+            if let Some(status) = self.process.try_wait().unwrap() {
+                return Some(status);
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        let _ = self.process.kill();
+        let _ = self.process.wait();
+        None
+    }
 }
 
 impl Drop for Server {
     /// Closing stdin ends the server normally, which is when it writes its coverage data.
     fn drop(&mut self) {
         drop(self.process.stdin.take());
-        let _ = self.process.wait();
+        self.exited();
     }
 }
 
@@ -241,7 +261,7 @@ fn edit(line: u32, start: u32, end: u32, version: &str) -> Value {
 #[test]
 fn introduces_itself_and_its_capabilities() {
     let mut server = Server::spawn(&[]);
-    let result = server.initialize();
+    let result = server.initialize(json!({}));
     assert_eq!(result["serverInfo"]["name"], "gradle-catalog-lsp");
     assert_eq!(result["capabilities"]["textDocumentSync"], 1);
     assert_eq!(result["capabilities"]["inlayHintProvider"], true);
@@ -369,13 +389,18 @@ fn exits_after_shutdown() {
         Value::Null
     );
     server.notify("exit", Value::Null);
-    assert!(server.process.wait().unwrap().success());
+    assert!(
+        server
+            .exited()
+            .expect("the server is still running")
+            .success()
+    );
 }
 
 #[test]
 fn shows_a_release_published_since_the_last_lookup_once_it_expires() {
     let first = Repository::new(FIRST_REPOSITORY);
-    let mut server = Server::start_with(&[&first, &Repository::new(SECOND_REPOSITORY)]);
+    let mut server = Server::start_with(&[&first, &Repository::new(SECOND_REPOSITORY)], json!({}));
     assert_eq!(server.labels(), ["→ 4.12.0", "→ 2.1.0"]);
     first.publish("androidx/core/core-ktx", &["1.12.0", "1.13.1", "1.15.0"]);
     first.publish("com/example/missing", &["1.0", "1.1"]);
@@ -390,10 +415,46 @@ fn shows_a_release_published_since_the_last_lookup_once_it_expires() {
 fn keeps_the_known_versions_when_the_repositories_stop_answering() {
     let first = Repository::new(FIRST_REPOSITORY);
     let second = Repository::new(SECOND_REPOSITORY);
-    let mut server = Server::start_with(&[&first, &second]);
+    let mut server = Server::start_with(&[&first, &second], json!({}));
     assert_eq!(server.labels(), ["→ 4.12.0", "→ 2.1.0"]);
     first.empty();
     second.empty();
     thread::sleep(TTL);
     assert_eq!(server.labels(), ["→ 4.12.0", "→ 2.1.0"]);
+}
+
+#[test]
+fn asks_zed_to_refresh_the_hints_when_it_supports_it() {
+    let refresh_support = json!({ "workspace": { "inlayHint": { "refreshSupport": true } } });
+    let first = Repository::new(FIRST_REPOSITORY);
+    let mut server = Server::start_with(&[&first], refresh_support);
+    thread::sleep(TTL * 3);
+    server.hints(CATALOG_URI);
+    assert!(server.requests.len() >= 2);
+    assert!(
+        server
+            .requests
+            .iter()
+            .all(|method| method == "workspace/inlayHint/refresh")
+    );
+
+    assert_eq!(
+        server.request("shutdown", Value::Null).unwrap(),
+        Value::Null
+    );
+    server.notify("exit", Value::Null);
+    assert!(
+        server
+            .exited()
+            .expect("the server is still running")
+            .success()
+    );
+}
+
+#[test]
+fn never_asks_a_client_without_refresh_support() {
+    let mut server = Server::start();
+    thread::sleep(TTL * 3);
+    server.hints(CATALOG_URI);
+    assert!(server.requests.is_empty());
 }

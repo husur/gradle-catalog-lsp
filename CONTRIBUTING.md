@@ -26,7 +26,7 @@ Keep `--workspace`: a plain `cargo test` at the root only tests the Zed extensio
 The tests live in `server/tests`. Those in `lsp.rs` start the server binary and talk LSP to it, with
 a local HTTP server standing in for the Maven repositories (through
 `GRADLE_CATALOG_LSP_REPOSITORIES`), so they never reach the network. `GRADLE_CATALOG_LSP_TTL_MS`
-shortens the cache expiry, so they don't wait for hours.
+shortens the cache expiry and the refresh period, so they don't wait for hours.
 
 The CI runs `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings` and the
 tests through [cargo-llvm-cov](https://github.com/taiki-e/cargo-llvm-cov), which fails under 90% line
