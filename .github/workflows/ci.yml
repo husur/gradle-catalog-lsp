@@ -12,4 +12,11 @@ jobs:
       - uses: actions/checkout@v7
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
+      - run: rustup component add llvm-tools-preview
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: cargo-llvm-cov
+      # Runs the tests of the whole workspace, but the Zed extension stays out of the report: it only
+      # runs inside Zed. The threshold is the measured line coverage rounded down: raise it when
+      # tests are added, never lower it.
+      - run: cargo llvm-cov --workspace --exclude-from-report gradle-catalog-zed --fail-under-lines 38
