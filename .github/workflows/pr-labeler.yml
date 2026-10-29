@@ -2,8 +2,8 @@ name: PR labeler
 
 on:
   # pull_request_target lets the job label pull requests from forks. It is safe because the job
-  # never checks out nor runs their code: the rules only read the title and the branch, which is
-  # also why a push (`synchronize`) does not need to trigger it.
+  # never checks out nor runs their code: the rules only read the title, which is also why a push
+  # (`synchronize`) does not need to trigger it.
   pull_request_target:
     types: [opened, reopened, edited]
 

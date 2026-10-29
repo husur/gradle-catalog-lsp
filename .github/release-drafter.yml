@@ -39,29 +39,21 @@ version-resolver:
     labels: [feat]
   default: patch
 
-# Titles follow Conventional Commits (see CLAUDE.md); the branch name is a fallback while the title
-# is not compliant yet.
 autolabeler:
   - label: breaking
     title: ['/^[a-z]+(\([^)]*\))?!:/']
   - label: feat
     title: ['/^feat(\([^)]*\))?!?:/']
-    branch: ['/^(feat|feature)\//']
   - label: fix
     title: ['/^fix(\([^)]*\))?!?:/']
-    branch: ['/^fix\//']
   - label: refactor
     title: ['/^(refactor|perf)(\([^)]*\))?!?:/']
-    branch: ['/^(refactor|perf)\//']
   - label: test
     title: ['/^test(\([^)]*\))?!?:/']
-    branch: ['/^test\//']
   - label: docs
     title: ['/^docs(\([^)]*\))?!?:/']
-    branch: ['/^docs\//']
   - label: chore
     title: ['/^(chore|ci|build|style)(\([^)]*\))?!?:/']
-    branch: ['/^(chore|ci|build|style)\//']
 
 template: |
   $CHANGES
