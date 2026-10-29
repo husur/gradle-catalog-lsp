@@ -96,3 +96,6 @@ test and release the extension.
 ## License
 
 Licensed under the [Apache License 2.0](LICENSE).
+
+The language server binaries also contain third-party software: its licenses are in
+`THIRD-PARTY-LICENSES.md` and `COPYRIGHT-library.html`, attached to each release.

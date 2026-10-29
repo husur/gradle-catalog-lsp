@@ -64,7 +64,8 @@ For maintainers.
    registry points to, set `version` in `extension.toml` to the version of the draft, in a pull
    request merged before publishing.
 3. Publish the draft. The release workflow builds the server for the five platforms and attaches
-   the binaries to the release: check they are all there. Users get the new server the next time
+   the binaries to the release, with `THIRD-PARTY-LICENSES.md` and `COPYRIGHT-library.html`: check
+   they are all there. Users get the new server the next time
    Zed starts, without an update of the extension.
 4. If the extension changed, publish it in the
    [Zed extension registry](https://github.com/zed-industries/extensions), as described in

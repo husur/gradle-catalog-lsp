@@ -48,3 +48,26 @@ jobs:
         run: gh release upload "$GITHUB_REF_NAME" gradle-catalog-lsp-${{ matrix.target }}.gz --clobber
         env:
           GH_TOKEN: ${{ github.token }}
+
+  licenses:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: cargo-about
+      # `shell: bash` sets pipefail, so that `tr` does not hide a failure of cargo-about. Some crates
+      # ship their license with Windows line endings.
+      - shell: bash
+        run: |
+          cargo about generate --fail --locked -m server/Cargo.toml server/about.hbs | tr -d '\r' > THIRD-PARTY-LICENSES.md
+          cp "$(rustc --print sysroot)/share/doc/rust/COPYRIGHT-library.html" .
+      - if: github.event_name == 'release'
+        run: gh release upload "$GITHUB_REF_NAME" THIRD-PARTY-LICENSES.md COPYRIGHT-library.html --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
