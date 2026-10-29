@@ -27,6 +27,12 @@ fn orders_like_gradle() {
             pair[0],
             pair[1]
         );
+        assert!(
+            compare(pair[1], pair[0]).is_gt(),
+            "{} > {}",
+            pair[1],
+            pair[0]
+        );
     }
     assert!(compare("1.0-SNAPSHOT", "1.0-RC1").is_gt());
 }

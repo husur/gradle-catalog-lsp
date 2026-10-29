@@ -50,3 +50,29 @@ ksp = "com.google.devtools.ksp:2.0.21-1.0.27"
         ]
     );
 }
+
+fn versions(text: &str) -> Vec<String> {
+    parse(text).into_iter().map(|entry| entry.version).collect()
+}
+
+#[test]
+fn reads_partial_catalogs_and_skips_invalid_ones() {
+    assert!(parse("[libraries\nbroken").is_empty());
+    assert_eq!(
+        versions("[libraries]\nokhttp = \"com.squareup.okhttp3:okhttp:4.12.0\"\n"),
+        ["4.12.0"]
+    );
+    assert_eq!(
+        versions("[plugins]\nksp = \"com.google.devtools.ksp:2.0.21-1.0.27\"\n"),
+        ["2.0.21-1.0.27"]
+    );
+}
+
+#[test]
+fn skips_versions_whose_text_differs_from_their_value() {
+    let text = r#"[libraries]
+escaped = { module = "a:b", version = "1.0\u002E1" }
+multiline = { module = "c:d", version = """2.0""" }
+"#;
+    assert!(parse(text).is_empty());
+}

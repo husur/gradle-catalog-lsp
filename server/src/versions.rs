@@ -1,10 +1,11 @@
 use std::cmp::Ordering;
+use std::env;
 use std::sync::LazyLock;
 use std::time::Duration;
 
 use crate::catalog::Module;
 
-const REPOSITORIES: [&str; 3] = [
+const DEFAULT_REPOSITORIES: [&str; 3] = [
     "https://repo1.maven.org/maven2",
     "https://dl.google.com/dl/android/maven2",
     "https://plugins.gradle.org/m2",
@@ -24,6 +25,14 @@ const PRERELEASES: [&str; 12] = [
     "pre",
     "canary",
 ];
+
+/// The tests serve the metadata from a local server, listed in `GRADLE_CATALOG_LSP_REPOSITORIES`
+/// (comma-separated) in place of the default repositories.
+static REPOSITORIES: LazyLock<Vec<String>> =
+    LazyLock::new(|| match env::var("GRADLE_CATALOG_LSP_REPOSITORIES") {
+        Ok(list) => list.split(',').map(String::from).collect(),
+        Err(_) => DEFAULT_REPOSITORIES.map(String::from).to_vec(),
+    });
 
 static AGENT: LazyLock<ureq::Agent> = LazyLock::new(|| {
     ureq::Agent::config_builder()
