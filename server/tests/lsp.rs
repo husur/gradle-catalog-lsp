@@ -235,14 +235,32 @@ fn offers_the_update_as_a_code_action_on_its_line() {
     server.hints(CATALOG_URI);
     assert_eq!(
         server.actions(CATALOG_URI, 5),
-        json!([{
-            "title": "Update to 4.12.0",
-            "kind": "quickfix",
-            "edit": { "changes": { (CATALOG_URI): [edit(5, 36, 42, "4.12.0")] } },
-            "isPreferred": true,
-        }])
+        json!([
+            {
+                "title": "Update to 4.12.0",
+                "kind": "quickfix",
+                "edit": { "changes": { (CATALOG_URI): [edit(5, 36, 42, "4.12.0")] } },
+                "isPreferred": true,
+            },
+            // The shared `kotlin` ref is a single edit, and `core` (up to date) and `missing` (found
+            // nowhere) have none.
+            {
+                "title": "Update all 2 versions",
+                "kind": "source",
+                "edit": { "changes": { (CATALOG_URI): [
+                    edit(5, 36, 42, "4.12.0"),
+                    edit(1, 10, 16, "2.1.0"),
+                ] } },
+            },
+        ])
     );
     assert_eq!(server.actions(CATALOG_URI, 6), json!([]));
+}
+
+#[test]
+fn offers_no_code_action_before_the_versions_are_fetched() {
+    let mut server = Server::start();
+    assert_eq!(server.actions(CATALOG_URI, 5), json!([]));
 }
 
 #[test]
@@ -259,6 +277,9 @@ fn follows_the_catalog_as_it_is_edited_and_closed() {
     let hints = server.hints(CATALOG_URI);
     assert_eq!(hints.as_array().unwrap().len(), 1);
     assert_eq!(hints[0]["label"], "→ 2.1.0");
+    let actions = server.actions(CATALOG_URI, 1);
+    assert_eq!(actions.as_array().unwrap().len(), 1);
+    assert_eq!(actions[0]["title"], "Update to 2.1.0");
 
     server.notify(
         "textDocument/didClose",

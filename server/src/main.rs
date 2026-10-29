@@ -158,24 +158,43 @@ fn code_actions(
     };
     let lines = params.range.start.line..=params.range.end.line;
     let cache = cache.lock().unwrap();
-    catalog::parse(text)
+    let edits: Vec<TextEdit> = catalog::parse(text)
         .iter()
-        .filter(|entry| lines.contains(&position(text, entry.span.start).line))
         .filter_map(|entry| {
             let latest = update(entry, &cache)?;
-            let edit = TextEdit::new(range(text, entry), latest.to_string());
-            Some(CodeActionOrCommand::CodeAction(CodeAction {
-                title: format!("Update to {latest}"),
+            Some(TextEdit::new(range(text, entry), latest.to_string()))
+        })
+        .collect();
+    let mut actions: Vec<CodeActionOrCommand> = edits
+        .iter()
+        .filter(|edit| lines.contains(&edit.range.start.line))
+        .map(|edit| {
+            CodeActionOrCommand::CodeAction(CodeAction {
+                title: format!("Update to {}", edit.new_text),
                 kind: Some(CodeActionKind::QUICKFIX),
-                edit: Some(WorkspaceEdit {
-                    changes: Some(HashMap::from([(uri.clone(), vec![edit])])),
-                    ..Default::default()
-                }),
+                edit: Some(changes(&uri, vec![edit.clone()])),
                 is_preferred: Some(true),
                 ..Default::default()
-            }))
+            })
         })
-        .collect()
+        .collect();
+    // `source` rather than `source.fixAll`, which Zed would run on save for users who enabled it.
+    if !actions.is_empty() && edits.len() >= 2 {
+        actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+            title: format!("Update all {} versions", edits.len()),
+            kind: Some(CodeActionKind::SOURCE),
+            edit: Some(changes(&uri, edits)),
+            ..Default::default()
+        }));
+    }
+    actions
+}
+
+fn changes(uri: &Uri, edits: Vec<TextEdit>) -> WorkspaceEdit {
+    WorkspaceEdit {
+        changes: Some(HashMap::from([(uri.clone(), edits)])),
+        ..Default::default()
+    }
 }
 
 fn resolve(entries: &[Entry], cache: &Cache) {
