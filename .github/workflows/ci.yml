@@ -8,20 +8,46 @@ on:
 permissions:
   contents: read
 
+# The ruleset of main requires each job by its name: rename one there too, or every pull request
+# waits for a check that never comes.
 jobs:
-  check:
+  fmt:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - run: cargo fmt --all --check
+
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: rustup component add llvm-tools-preview
+
+  licenses:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
       - uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
         with:
-          tool: cargo-llvm-cov,cargo-about
+          tool: cargo-about
       # Fails on the pull request that brings a dependency whose license server/about.toml does not
       # accept, rather than on the release that would attach the licenses.
       - run: cargo about generate --fail --locked -m server/Cargo.toml server/about.hbs > /dev/null
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: rustup component add llvm-tools-preview
+      - uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
+        with:
+          tool: cargo-llvm-cov
       # Runs the tests of the whole workspace, but the Zed extension stays out of the report: it only
       # runs inside Zed. The server sits near 99%, and the threshold leaves some room under it so a
       # single unreachable branch does not fail the build. Never lower it.
