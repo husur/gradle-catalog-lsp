@@ -1,15 +1,13 @@
 // lsp_types::Uri holds a Cell (from fluent_uri) but hashes only its string, so it is a safe key.
 #![allow(clippy::mutable_key_type)]
 
-mod catalog;
-mod versions;
-
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use catalog::{Entry, Module};
+use gradle_catalog_lsp::catalog::{self, Entry, Module};
+use gradle_catalog_lsp::versions;
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, Response};
 use lsp_types::{
     CodeAction, CodeActionKind, CodeActionOrCommand, CodeActionParams,
