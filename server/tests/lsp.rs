@@ -568,6 +568,37 @@ fn authenticates_with_the_credentials_gradle_would_use() {
 }
 
 #[test]
+fn logs_a_repository_that_refuses_its_credentials() {
+    let home = gradle_home("refused", "acmeUsername=acme\nacmePassword=wrong\n");
+    let first = Repository::new(FIRST_REPOSITORY, None);
+    let second = Repository::new(SECOND_REPOSITORY, None);
+    let private = Repository::new(PRIVATE_REPOSITORY, Some(AUTHORIZATION));
+    let configured = json!([{ "url": private.url, "credentials": "acme" }]);
+    let env = [("GRADLE_USER_HOME", home.to_str().unwrap())];
+    let mut server = Server::configured(&[&first, &second], &env, configured);
+    assert_eq!(server.labels(), ["→ 4.12.0", "→ 2.1.0"]);
+    // The first and second repositories answer 404 for the modules they don't have, which is not
+    // worth a line.
+    let errors = server.stop();
+    let refused = format!(
+        "{}/com/example/missing/maven-metadata.xml: http status: 401",
+        private.url
+    );
+    assert!(errors.lines().any(|line| line == refused), "{errors}");
+    assert!(
+        errors
+            .lines()
+            .all(|line| line.ends_with(": http status: 401")),
+        "{errors}"
+    );
+    assert!(
+        !errors.contains("wrong") && !errors.contains("Basic"),
+        "{errors}"
+    );
+    fs::remove_dir_all(home).unwrap();
+}
+
+#[test]
 fn skips_a_repository_whose_credentials_are_missing() {
     let home = gradle_home("missing", "");
     let first = Repository::new(FIRST_REPOSITORY, None);
