@@ -1,10 +1,11 @@
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
-use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
+use std::path::PathBuf;
+use std::process::{self, Child, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
-use std::thread;
 use std::time::Duration;
+use std::{env, fs, thread};
 
 use lsp_server::{Message, Notification, Request, RequestId, Response, ResponseError};
 use serde_json::{Value, json};
@@ -48,23 +49,41 @@ const SECOND_REPOSITORY: Artifacts = &[
     ),
 ];
 
+const PRIVATE_REPOSITORY: Artifacts = &[("com/example/missing", &["1.0", "1.1"])];
+
+/// `acme:s3cr3t`, as Basic authentication.
+const AUTHORIZATION: &str = "Basic YWNtZTpzM2NyM3Q=";
+
 /// Serves `maven-metadata.xml` like a Maven repository, and 404 for anything else.
 struct Repository {
     url: String,
     artifacts: Arc<Mutex<HashMap<String, Vec<String>>>>,
+    /// The request and header lines received, oldest first.
+    received: Arc<Mutex<Vec<String>>>,
 }
 
 impl Repository {
     fn new(artifacts: Artifacts) -> Self {
+        Self::serve(artifacts, None)
+    }
+
+    /// Answers 401 to requests without this `Authorization` header.
+    fn secured(artifacts: Artifacts, authorization: &'static str) -> Self {
+        Self::serve(artifacts, Some(authorization))
+    }
+
+    fn serve(artifacts: Artifacts, authorization: Option<&'static str>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let repository = Self {
             url: format!("http://{}", listener.local_addr().unwrap()),
             artifacts: Arc::default(),
+            received: Arc::default(),
         };
         for (artifact, versions) in artifacts {
             repository.publish(artifact, versions);
         }
         let served = Arc::clone(&repository.artifacts);
+        let received = Arc::clone(&repository.received);
         thread::spawn(move || {
             for mut stream in listener.incoming().flatten() {
                 let request: Vec<String> = BufReader::new(&stream)
@@ -72,11 +91,23 @@ impl Repository {
                     .map_while(Result::ok)
                     .take_while(|line| !line.is_empty())
                     .collect();
+                received.lock().unwrap().extend(request.iter().cloned());
                 let path = request
                     .first()
                     .and_then(|line| line.split(' ').nth(1))
                     .unwrap_or_default();
+                let authorized = authorization.is_none_or(|expected| {
+                    request.iter().any(|line| {
+                        line.split_once(':').is_some_and(|(name, value)| {
+                            name.eq_ignore_ascii_case("authorization") && value.trim() == expected
+                        })
+                    })
+                });
                 let response = match served.lock().unwrap().get(path) {
+                    _ if !authorized => {
+                        "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                            .to_string()
+                    }
                     Some(versions) => {
                         let versions: String = versions
                             .iter()
@@ -111,6 +142,17 @@ impl Repository {
     fn empty(&self) {
         self.artifacts.lock().unwrap().clear();
     }
+
+    fn received(&self) -> Vec<String> {
+        self.received.lock().unwrap().clone()
+    }
+
+    fn authorizations(&self) -> Vec<String> {
+        self.received()
+            .into_iter()
+            .filter(|line| line.to_ascii_lowercase().starts_with("authorization:"))
+            .collect()
+    }
 }
 
 /// The language server binary, driven over stdio like Zed does.
@@ -123,13 +165,15 @@ struct Server {
 }
 
 impl Server {
-    fn spawn(repositories: &[&Repository]) -> Self {
+    fn spawn(repositories: &[&Repository], env: &[(&str, &str)]) -> Self {
         let urls: Vec<&str> = repositories.iter().map(|r| r.url.as_str()).collect();
         let mut process = Command::new(env!("CARGO_BIN_EXE_gradle-catalog-lsp"))
             .env("GRADLE_CATALOG_LSP_REPOSITORIES", urls.join(","))
             .env("GRADLE_CATALOG_LSP_TTL_MS", TTL.as_millis().to_string())
+            .envs(env.iter().copied())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .spawn()
             .unwrap();
         let output = BufReader::new(process.stdout.take().unwrap());
@@ -148,16 +192,25 @@ impl Server {
     }
 
     fn start_with(repositories: &[&Repository], capabilities: Value) -> Self {
-        let mut server = Self::spawn(repositories);
-        server.initialize(capabilities);
+        Self::launch(repositories, &[], json!({ "capabilities": capabilities }))
+    }
+
+    /// Starts with the `repositories` option of the initialization options set to `configured`.
+    fn configured(defaults: &[&Repository], env: &[(&str, &str)], configured: Value) -> Self {
+        let options = json!({ "repositories": configured });
+        let params = json!({ "capabilities": {}, "initializationOptions": options });
+        Self::launch(defaults, env, params)
+    }
+
+    fn launch(repositories: &[&Repository], env: &[(&str, &str)], params: Value) -> Self {
+        let mut server = Self::spawn(repositories, env);
+        server.initialize(params);
         server.open(CATALOG_URI, CATALOG);
         server
     }
 
-    fn initialize(&mut self, capabilities: Value) -> Value {
-        let result = self
-            .request("initialize", json!({ "capabilities": capabilities }))
-            .unwrap();
+    fn initialize(&mut self, params: Value) -> Value {
+        let result = self.request("initialize", params).unwrap();
         self.notify("initialized", json!({}));
         result
     }
@@ -237,14 +290,31 @@ impl Server {
         let _ = self.process.wait();
         None
     }
+
+    /// Closing stdin ends the server normally, which is when it writes its coverage data.
+    fn stop(&mut self) -> String {
+        drop(self.process.stdin.take());
+        self.exited();
+        let mut errors = String::new();
+        if let Some(mut stderr) = self.process.stderr.take() {
+            let _ = stderr.read_to_string(&mut errors);
+        }
+        errors
+    }
 }
 
 impl Drop for Server {
-    /// Closing stdin ends the server normally, which is when it writes its coverage data.
     fn drop(&mut self) {
-        drop(self.process.stdin.take());
-        self.exited();
+        eprint!("{}", self.stop());
     }
+}
+
+/// A Gradle user home of its own, so that the tests never read yours.
+fn gradle_home(test: &str, properties: &str) -> PathBuf {
+    let home = env::temp_dir().join(format!("gradle-catalog-lsp-{}-{test}", process::id()));
+    fs::create_dir_all(&home).unwrap();
+    fs::write(home.join("gradle.properties"), properties).unwrap();
+    home
 }
 
 fn range(start_line: u32, start_character: u32, end_line: u32, end_character: u32) -> Value {
@@ -260,8 +330,8 @@ fn edit(line: u32, start: u32, end: u32, version: &str) -> Value {
 
 #[test]
 fn introduces_itself_and_its_capabilities() {
-    let mut server = Server::spawn(&[]);
-    let result = server.initialize(json!({}));
+    let mut server = Server::spawn(&[], &[]);
+    let result = server.initialize(json!({ "capabilities": {} }));
     assert_eq!(result["serverInfo"]["name"], "gradle-catalog-lsp");
     assert_eq!(result["capabilities"]["textDocumentSync"], 1);
     assert_eq!(result["capabilities"]["inlayHintProvider"], true);
@@ -457,4 +527,78 @@ fn never_asks_a_client_without_refresh_support() {
     thread::sleep(TTL * 3);
     server.hints(CATALOG_URI);
     assert!(server.requests.is_empty());
+}
+
+#[test]
+fn queries_the_configured_repositories_before_the_default_ones() {
+    let first = Repository::new(FIRST_REPOSITORY);
+    let second = Repository::new(SECOND_REPOSITORY);
+    let private = Repository::new(&[
+        ("com/example/missing", &["1.0", "1.1"]),
+        ("com/squareup/okhttp3/okhttp", &["4.11.0", "4.13.0"]),
+    ]);
+    let configured = json!([{ "url": private.url }]);
+    let mut server = Server::configured(&[&first, &second], &[], configured);
+    // The second repository has okhttp too, up to 4.12.0.
+    assert_eq!(server.labels(), ["→ 4.13.0", "→ 1.1", "→ 2.1.0"]);
+}
+
+#[test]
+fn authenticates_with_the_credentials_gradle_would_use() {
+    // The environment wins over `gradle.properties`, which also holds a wrong password here.
+    let home = gradle_home("environment", "acmePassword=wrong\n");
+    let environment = [
+        ("GRADLE_USER_HOME", home.to_str().unwrap()),
+        ("ORG_GRADLE_PROJECT_acmeUsername", "acme"),
+        ("ORG_GRADLE_PROJECT_acmePassword", "s3cr3t"),
+    ];
+    let properties = "# acmePassword=wrong\nacmeUsername = acme\nacmePassword=s3cr3t\n";
+    let other_home = gradle_home("properties", properties);
+    let properties = [("GRADLE_USER_HOME", other_home.to_str().unwrap())];
+    for env in [&environment[..], &properties[..]] {
+        let first = Repository::new(FIRST_REPOSITORY);
+        let second = Repository::new(SECOND_REPOSITORY);
+        let private = Repository::secured(PRIVATE_REPOSITORY, AUTHORIZATION);
+        let configured = json!([{ "url": private.url, "credentials": "acme" }]);
+        let mut server = Server::configured(&[&first, &second], env, configured);
+        assert_eq!(server.labels(), ["→ 4.12.0", "→ 1.1", "→ 2.1.0"]);
+        assert!(first.authorizations().is_empty());
+        assert!(second.authorizations().is_empty());
+    }
+    fs::remove_dir_all(home).unwrap();
+    fs::remove_dir_all(other_home).unwrap();
+}
+
+#[test]
+fn skips_a_repository_whose_credentials_are_missing() {
+    let home = gradle_home("missing", "");
+    let first = Repository::new(FIRST_REPOSITORY);
+    let second = Repository::new(SECOND_REPOSITORY);
+    let private = Repository::secured(PRIVATE_REPOSITORY, AUTHORIZATION);
+    let configured = json!([{ "url": private.url, "credentials": "acme" }]);
+    let env = [("GRADLE_USER_HOME", home.to_str().unwrap())];
+    let mut server = Server::configured(&[&first, &second], &env, configured);
+    assert_eq!(server.labels(), ["→ 4.12.0", "→ 2.1.0"]);
+    assert!(private.received().is_empty());
+    fs::remove_dir_all(home).unwrap();
+}
+
+#[test]
+fn ignores_invalid_entries_and_credentials_written_in_urls() {
+    let first = Repository::new(FIRST_REPOSITORY);
+    let second = Repository::new(SECOND_REPOSITORY);
+    let exposed = Repository::new(&[("com/example/missing", &["1.0", "9.9"])]);
+    let private = Repository::new(PRIVATE_REPOSITORY);
+    let configured = json!([
+        { "url": exposed.url.replace("http://", "http://acme:s3cr3t@") },
+        { "url": 42 },
+        "https://jitpack.io",
+        { "url": private.url },
+    ]);
+    let mut server = Server::configured(&[&first, &second], &[], configured);
+    let hints = server.hints(CATALOG_URI);
+    assert_eq!(server.labels(), ["→ 4.12.0", "→ 1.1", "→ 2.1.0"]);
+    assert!(exposed.received().is_empty());
+    let output = format!("{hints}{}", server.stop());
+    assert!(!output.contains("s3cr3t"));
 }

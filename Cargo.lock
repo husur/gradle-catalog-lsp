@@ -251,6 +251,7 @@ dependencies = [
 name = "gradle-catalog-lsp"
 version = "0.0.0"
 dependencies = [
+ "base64",
  "lsp-server",
  "lsp-types",
  "serde_json",

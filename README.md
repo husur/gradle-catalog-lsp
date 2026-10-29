@@ -35,6 +35,40 @@ Then make sure that:
   "inlay_hints": { "enabled": true }
   ```
 
+## Private repositories
+
+To get hints for modules published on your company's Nexus or Artifactory, on GitHub Packages or on
+JitPack, list their repositories in your Zed settings. They are queried in this order, before Maven
+Central, Google Maven and the Gradle Plugin Portal:
+
+```json
+"lsp": {
+  "gradle-catalog-lsp": {
+    "initialization_options": {
+      "repositories": [
+        { "url": "https://nexus.acme.com/repository/maven-public", "credentials": "acmeNexus" },
+        { "url": "https://jitpack.io" }
+      ]
+    }
+  }
+}
+```
+
+`credentials` names a pair of Gradle properties, read like Gradle reads
+`credentials(PasswordCredentials::class)`: here `acmeNexusUsername` and `acmeNexusPassword`, from
+the environment variables `ORG_GRADLE_PROJECT_acmeNexusUsername` and
+`ORG_GRADLE_PROJECT_acmeNexusPassword`, or else from `~/.gradle/gradle.properties` (in
+`GRADLE_USER_HOME` if you set it). A token goes in the password, as for Gradle. This keeps
+credentials out of the Zed settings, and they are only sent over HTTPS (or to localhost). A
+repository whose credentials can't be found is skipped, and an entry with credentials in its URL
+is ignored.
+
+Settings and credentials are read when the language server starts: run
+`editor: restart language server` after changing them. Once you trust a project in Zed, which
+leaves [Restricted Mode](https://zed.dev/docs/worktree-trust), its `.zed/settings.json` can add
+repositories too, and your credentials are then sent to the URL it names: check its settings before
+trusting a project you didn't write.
+
 ## Which version is suggested
 
 - Versions are compared with [Gradle's ordering rules](https://docs.gradle.org/current/userguide/dependency_versions.html#sec:version-ordering).
@@ -46,10 +80,11 @@ Then make sure that:
 
 ## Limits
 
-- Private repositories (Nexus, Artifactory, JitPack…) are not queried: their modules get no hint.
 - Rich versions (`strictly`, `require`, `prefer`, `reject`) and dynamic ones (`1.+`, ranges,
   `latest.release`) are skipped.
 - Coordinates written directly in `build.gradle(.kts)` are not read, only catalogs.
+- Private repositories need Basic authentication, a username with a password or token: Bearer
+  tokens and custom headers are not supported.
 - A new release can take up to an hour to show, and a module that could not be found, offline for
   instance, is looked up again after 5 minutes.
 

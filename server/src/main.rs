@@ -59,10 +59,16 @@ type Cache = Arc<Mutex<HashMap<Module, Fetched>>>;
 fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let (connection, io_threads) = Connection::stdio();
     let (initialize_id, initialize_params) = connection.initialize_start()?;
-    let refresh_support = from_value::<InitializeParams>(initialize_params)
-        .ok()
-        .and_then(|params| params.capabilities.workspace?.inlay_hint?.refresh_support)
+    let InitializeParams {
+        capabilities,
+        initialization_options,
+        ..
+    } = from_value(initialize_params).unwrap_or_default();
+    let refresh_support = capabilities
+        .workspace
+        .and_then(|workspace| workspace.inlay_hint?.refresh_support)
         .unwrap_or(false);
+    versions::configure(initialization_options.as_ref());
     let initialize_result = InitializeResult {
         capabilities: ServerCapabilities {
             text_document_sync: Some(TextDocumentSyncKind::FULL.into()),
