@@ -34,6 +34,10 @@ tests through [cargo-llvm-cov](https://github.com/taiki-e/cargo-llvm-cov), which
 coverage of the server. To measure it locally:
 `cargo llvm-cov --workspace --exclude-from-report gradle-catalog-zed`.
 
+It also runs [cargo-about](https://github.com/EmbarkStudios/cargo-about), which fails when a
+dependency of the server comes under a license that `server/about.toml` does not accept. Check that
+the new license lets us distribute the binaries before adding it there.
+
 To try your changes in Zed, run `zed: install dev extension` and pick this folder. After each change
 to the server, reinstall it and run `editor: restart language server`.
 
@@ -60,7 +64,8 @@ For maintainers.
    registry points to, set `version` in `extension.toml` to the version of the draft, in a pull
    request merged before publishing.
 3. Publish the draft. The release workflow builds the server for the five platforms and attaches
-   the binaries to the release: check they are all there. Users get the new server the next time
+   the binaries to the release, with `THIRD-PARTY-LICENSES.md` and `COPYRIGHT-library.html`: check
+   they are all there. Users get the new server the next time
    Zed starts, without an update of the extension.
 4. If the extension changed, publish it in the
    [Zed extension registry](https://github.com/zed-industries/extensions), as described in
