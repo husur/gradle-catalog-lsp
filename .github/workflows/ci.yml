@@ -15,7 +15,10 @@ jobs:
       - run: rustup component add llvm-tools-preview
       - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
         with:
-          tool: cargo-llvm-cov
+          tool: cargo-llvm-cov,cargo-about
+      # Fails on the pull request that brings a dependency whose license server/about.toml does not
+      # accept, rather than on the release that would attach the licenses.
+      - run: cargo about generate --fail --locked -m server/Cargo.toml server/about.hbs > /dev/null
       # Runs the tests of the whole workspace, but the Zed extension stays out of the report: it only
       # runs inside Zed. The server sits near 99%, and the threshold leaves some room under it so a
       # single unreachable branch does not fail the build. Never lower it.

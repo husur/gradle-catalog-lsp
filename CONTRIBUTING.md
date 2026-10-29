@@ -34,6 +34,10 @@ tests through [cargo-llvm-cov](https://github.com/taiki-e/cargo-llvm-cov), which
 coverage of the server. To measure it locally:
 `cargo llvm-cov --workspace --exclude-from-report gradle-catalog-zed`.
 
+It also runs [cargo-about](https://github.com/EmbarkStudios/cargo-about), which fails when a
+dependency of the server comes under a license that `server/about.toml` does not accept. Check that
+the new license lets us distribute the binaries before adding it there.
+
 To try your changes in Zed, run `zed: install dev extension` and pick this folder. After each change
 to the server, reinstall it and run `editor: restart language server`.
 
