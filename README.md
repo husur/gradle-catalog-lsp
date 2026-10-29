@@ -61,12 +61,34 @@ Then make sure that:
 To work on it, install Rust with [rustup](https://rustup.rs), then:
 
 ```sh
-cargo test --workspace          # unit tests
+cargo test --workspace          # all the tests
 cargo install --path server     # puts gradle-catalog-lsp in ~/.cargo/bin, which must be in your PATH
 ```
 
+The CI also requires 90% line coverage of the server, measured with
+[cargo-llvm-cov](https://github.com/taiki-e/cargo-llvm-cov):
+`cargo llvm-cov --workspace --exclude-from-report gradle-catalog-zed`.
+
 In Zed, run `zed: install dev extension` and pick this folder. After each change to the server,
 reinstall it and run `editor: restart language server`.
+
+## Releasing
+
+1. Merge the pull requests. Release Drafter keeps a draft release up to date, with the next version
+   resolved from their labels: `breaking` bumps the major, `feat` the minor, anything else the patch.
+2. If the extension (`src/` or `extension.toml`) changed since the commit the Zed extension
+   registry points to, set `version` in `extension.toml` to the version of the draft, in a pull
+   request merged before publishing.
+3. Publish the draft. The release workflow builds the server for the five platforms and attaches
+   the binaries to the release: check they are all there. Users get the new server the next time
+   Zed starts, without an update of the extension.
+4. If the extension changed, publish it in the
+   [Zed extension registry](https://github.com/zed-industries/extensions), as described in
+   [Updating an Extension](https://zed.dev/docs/extensions/publishing/updating-and-maintenance):
+   in a fork, move the `extensions/gradle-catalog-lsp` submodule to the release commit, set the same
+   version in `extensions.toml`, and open a pull request. Write its description yourself: the
+   registry does not accept contributions from AI agents (see its
+   [AI policy](https://github.com/zed-industries/extensions/blob/main/AI_POLICY.md)).
 
 ## License
 
