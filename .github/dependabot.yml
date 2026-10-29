@@ -1,0 +1,35 @@
+version: 2
+
+updates:
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "08:00"
+      timezone: "Europe/Paris"
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      cargo:
+        patterns:
+          - "*"
+    ignore:
+      # Zed does not load an extension built against a newer API than it knows, so moving to a new
+      # API version drops the older Zed releases: it only happens when the extension needs it.
+      - dependency-name: "zed_extension_api"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "08:00"
+      timezone: "Europe/Paris"
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      actions:
+        patterns:
+          - "*"
