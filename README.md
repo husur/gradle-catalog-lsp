@@ -64,9 +64,10 @@ repository whose credentials can't be found is skipped, and an entry with creden
 is ignored.
 
 Settings and credentials are read when the language server starts: run
-`editor: restart language server` after changing them. A project's `.zed/settings.json` can add
-repositories too, and your credentials are then sent to the URL it names: check that URL before
-opening a project you don't trust.
+`editor: restart language server` after changing them. Once you trust a project in Zed, which
+leaves [Restricted Mode](https://zed.dev/docs/worktree-trust), its `.zed/settings.json` can add
+repositories too, and your credentials are then sent to the URL it names: check its settings before
+trusting a project you didn't write.
 
 ## Which version is suggested
 
