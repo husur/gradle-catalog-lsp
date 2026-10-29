@@ -7,7 +7,8 @@ other ecosystems, [Depsy](https://github.com/mpiton/zed-depsy) is the place.
 ## Layout
 
 - `server/` is the language server: a standalone binary that talks LSP over stdio. Its
-  `src/lib.rs` holds the catalog parser and the version logic, and `src/main.rs` the LSP loop.
+  `src/lib.rs` holds the catalog parser (`catalog.rs`), the repository queries (`repositories.rs`)
+  and the version ordering (`versions.rs`), and `src/main.rs` the LSP loop.
 - `src/lib.rs` at the root is the Zed extension, compiled to WebAssembly by Zed. It only tells Zed
   to start `gradle-catalog-lsp` on TOML files, and prefers a binary found in your `PATH` over the
   downloaded one.

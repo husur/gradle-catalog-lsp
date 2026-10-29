@@ -10,7 +10,7 @@ use std::thread;
 use std::time::{Duration, SystemTime};
 
 use gradle_catalog_lsp::catalog::{self, Entry, Module};
-use gradle_catalog_lsp::versions;
+use gradle_catalog_lsp::{repositories, versions};
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, Response};
 use lsp_types::{
     CodeAction, CodeActionKind, CodeActionOrCommand, CodeActionParams,
@@ -68,7 +68,7 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         .workspace
         .and_then(|workspace| workspace.inlay_hint?.refresh_support)
         .unwrap_or(false);
-    versions::configure(initialization_options.as_ref());
+    repositories::configure(initialization_options.as_ref());
     let initialize_result = InitializeResult {
         capabilities: ServerCapabilities {
             text_document_sync: Some(TextDocumentSyncKind::FULL.into()),
@@ -271,7 +271,7 @@ fn resolve(entries: &[Entry], cache: &Cache) {
         for module in stale {
             scope.spawn(move || {
                 let fetched = Fetched {
-                    versions: versions::fetch(module),
+                    versions: repositories::fetch(module),
                     at: SystemTime::now(),
                 };
                 let mut cache = cache.lock().unwrap();
