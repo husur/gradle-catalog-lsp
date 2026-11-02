@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
@@ -53,6 +53,31 @@ const SECOND_REPOSITORY: Artifacts = &[
 ];
 
 const PRIVATE_REPOSITORY: Artifacts = &[("com/example/missing", &["1.0", "1.1"])];
+
+/// The advisories OSV knows, by `group:name@version`.
+const ADVISORIES: &[(&str, &[(&str, &str)])] = &[
+    (
+        "com.squareup.okhttp3:okhttp@4.11.0",
+        &[
+            ("GHSA-moderate", "MODERATE"),
+            ("GHSA-high", "HIGH"),
+            ("GHSA-low", "LOW"),
+        ],
+    ),
+    (
+        "org.jetbrains.kotlin:kotlin-stdlib@2.0.21",
+        &[("GHSA-stdlib", "MODERATE")],
+    ),
+    (
+        "org.jetbrains.kotlin:kotlin-test@2.0.21",
+        &[("GHSA-stdlib", "MODERATE"), ("GHSA-test", "HIGH")],
+    ),
+    (
+        "org.jetbrains.kotlin.android:org.jetbrains.kotlin.android.gradle.plugin@2.0.21",
+        &[("GHSA-plugin", "CRITICAL")],
+    ),
+    ("com.example:missing@1.0", &[("GHSA-missing", "CRITICAL")]),
+];
 
 /// `acme:s3cr3t`, as Basic authentication.
 const AUTHORIZATION: &str = "Basic YWNtZTpzM2NyM3Q=";
@@ -164,6 +189,92 @@ impl Repository {
     }
 }
 
+/// Answers `POST /v1/query` like osv.dev, from `ADVISORIES`.
+struct Osv {
+    url: String,
+    status: Arc<Mutex<u16>>,
+    queries: Arc<Mutex<Vec<Value>>>,
+}
+
+impl Osv {
+    fn new() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let osv = Self {
+            url: format!("http://{}", listener.local_addr().unwrap()),
+            status: Arc::new(Mutex::new(200)),
+            queries: Arc::default(),
+        };
+        let status = Arc::clone(&osv.status);
+        let queries = Arc::clone(&osv.queries);
+        thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut reader = BufReader::new(&stream);
+                let mut head = vec![];
+                let mut line = String::new();
+                while reader.read_line(&mut line).unwrap() > "\r\n".len() {
+                    head.push(line.trim_end().to_ascii_lowercase());
+                    line.clear();
+                }
+                let length = head
+                    .iter()
+                    .find_map(|line| line.strip_prefix("content-length:"))
+                    .map_or(0, |length| length.trim().parse().unwrap());
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body).unwrap();
+                let query: Value = serde_json::from_slice(&body).unwrap();
+                let key = format!(
+                    "{}@{}",
+                    query["package"]["name"].as_str().unwrap(),
+                    query["version"].as_str().unwrap()
+                );
+                queries.lock().unwrap().push(query);
+                let vulns: Vec<Value> = ADVISORIES
+                    .iter()
+                    .filter(|(queried, _)| *queried == key)
+                    .flat_map(|(_, advisories)| advisories.iter())
+                    .map(|(id, severity)| json!({ "id": id, "database_specific": { "severity": severity } }))
+                    .collect();
+                let status = match head[0].starts_with("post /v1/query ") {
+                    true => *status.lock().unwrap(),
+                    false => 404,
+                };
+                let body = match (status, vulns.is_empty()) {
+                    (200, true) => json!({}).to_string(),
+                    (200, false) => json!({ "vulns": vulns }).to_string(),
+                    _ => String::new(),
+                };
+                let response = format!(
+                    "HTTP/1.1 {status} OSV\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        osv
+    }
+
+    fn fail(&self) {
+        *self.status.lock().unwrap() = 500;
+    }
+
+    /// The `group:name@version` queried, sorted, after checking that nothing else was sent.
+    fn queried(&self) -> Vec<String> {
+        let queries = self.queries.lock().unwrap();
+        let mut queried: Vec<String> = queries
+            .iter()
+            .map(|query| {
+                let name = query["package"]["name"].as_str().unwrap();
+                let version = query["version"].as_str().unwrap();
+                let expected = json!({ "package": { "ecosystem": "Maven", "name": name }, "version": version });
+                assert_eq!(*query, expected);
+                format!("{name}@{version}")
+            })
+            .collect();
+        queried.sort();
+        queried
+    }
+}
+
 /// The language server binary, driven over stdio like Zed does.
 struct Server {
     process: Child,
@@ -209,6 +320,16 @@ impl Server {
         let options = json!({ "repositories": configured });
         let params = json!({ "capabilities": {}, "initializationOptions": options });
         Self::launch(defaults, env, params)
+    }
+
+    /// Starts against `osv`, with these initialization options.
+    fn checking(repositories: &[&Repository], osv: &Osv, options: Value) -> Self {
+        let params = json!({ "capabilities": {}, "initializationOptions": options });
+        Self::launch(
+            repositories,
+            &[("GRADLE_CATALOG_LSP_OSV", &osv.url)],
+            params,
+        )
     }
 
     fn launch(repositories: &[&Repository], env: &[(&str, &str)], params: Value) -> Self {
@@ -289,6 +410,17 @@ impl Server {
         .unwrap()
     }
 
+    fn diagnostics(&mut self, uri: &str) -> Value {
+        let report = self
+            .request(
+                "textDocument/diagnostic",
+                json!({ "textDocument": { "uri": uri } }),
+            )
+            .unwrap();
+        assert_eq!(report["kind"], "full");
+        report["items"].clone()
+    }
+
     fn labels(&mut self) -> Vec<String> {
         let hints = self.hints(CATALOG_URI);
         let hints = hints.as_array().unwrap();
@@ -357,6 +489,10 @@ fn introduces_itself_and_its_capabilities() {
     assert_eq!(result["capabilities"]["inlayHintProvider"], true);
     assert_eq!(result["capabilities"]["codeActionProvider"], true);
     assert_eq!(result["capabilities"]["hoverProvider"], true);
+    assert_eq!(
+        result["capabilities"]["diagnosticProvider"],
+        json!({ "interFileDependencies": false, "workspaceDiagnostics": false })
+    );
 }
 
 #[test]
@@ -576,18 +712,23 @@ fn keeps_the_known_versions_when_the_repositories_stop_answering() {
 }
 
 #[test]
-fn asks_zed_to_refresh_the_hints_when_it_supports_it() {
-    let refresh_support = json!({ "workspace": { "inlayHint": { "refreshSupport": true } } });
+fn asks_zed_to_refresh_the_hints_and_diagnostics_when_it_supports_it() {
+    let refresh_support = json!({ "workspace": {
+        "inlayHint": { "refreshSupport": true },
+        "diagnostics": { "refreshSupport": true },
+    } });
     let first = Repository::new(FIRST_REPOSITORY, None);
     let mut server = Server::start_with(&[&first], refresh_support);
     thread::sleep(TTL * 3);
     server.hints(CATALOG_URI);
-    assert!(server.requests.len() >= 2);
-    assert!(
-        server
-            .requests
-            .iter()
-            .all(|method| method == "workspace/inlayHint/refresh")
+    assert!(server.requests.len() >= 4);
+    let methods: HashSet<&str> = server.requests.iter().map(String::as_str).collect();
+    assert_eq!(
+        methods,
+        HashSet::from([
+            "workspace/inlayHint/refresh",
+            "workspace/diagnostic/refresh"
+        ])
     );
 
     assert_eq!(
@@ -738,4 +879,151 @@ fn ignores_invalid_entries_and_credentials_written_in_urls() {
     assert!(exposed.received().is_empty());
     let output = format!("{hints}{}", server.stop());
     assert!(!output.contains("s3cr3t"));
+}
+
+fn vulnerabilities(range: Value, severity: u8, code: &str, message: &str) -> Value {
+    json!({
+        "range": range,
+        "severity": severity,
+        "code": code,
+        "codeDescription": { "href": format!("https://osv.dev/vulnerability/{code}") },
+        "source": "OSV",
+        "message": message,
+    })
+}
+
+#[test]
+fn warns_about_the_known_vulnerabilities_of_the_versions() {
+    let first = Repository::new(FIRST_REPOSITORY, None);
+    first.publish("org/jetbrains/kotlin/kotlin-reflect", &["2.0.21"]);
+    first.publish("org/jetbrains/kotlin/kotlin-test", &["2.0.21"]);
+    let second = Repository::new(SECOND_REPOSITORY, None);
+    let osv = Osv::new();
+    let mut server = Server::checking(&[&first, &second], &osv, json!({}));
+    // `core` has no advisory and `missing` is found nowhere. The plugin that shares the `kotlin`
+    // ref would bring a critical one, but OSV is not asked about plugins.
+    assert_eq!(
+        server.diagnostics(CATALOG_URI),
+        json!([
+            vulnerabilities(
+                range(5, 36, 5, 42),
+                2,
+                "GHSA-high",
+                "3 known vulnerabilities (1 high): GHSA-high, GHSA-moderate, GHSA-low",
+            ),
+            vulnerabilities(
+                range(1, 10, 1, 16),
+                3,
+                "GHSA-stdlib",
+                "1 known vulnerability: GHSA-stdlib",
+            ),
+        ])
+    );
+    assert_eq!(
+        osv.queried(),
+        [
+            "androidx.core:core-ktx@1.13.1",
+            "com.squareup.okhttp3:okhttp@4.11.0",
+            "org.jetbrains.kotlin:kotlin-stdlib@2.0.21",
+        ]
+    );
+
+    // A single diagnostic for the ref, where kotlin-reflect has no advisory and kotlin-test shares
+    // one with the standard library.
+    let uri = "file:///project/gradle/kotlin.versions.toml";
+    let catalog = r#"[versions]
+kotlin = "2.0.21"
+
+[libraries]
+stdlib = { module = "org.jetbrains.kotlin:kotlin-stdlib", version.ref = "kotlin" }
+reflect = { module = "org.jetbrains.kotlin:kotlin-reflect", version.ref = "kotlin" }
+test = { module = "org.jetbrains.kotlin:kotlin-test", version.ref = "kotlin" }
+"#;
+    server.open(uri, catalog);
+    assert_eq!(
+        server.diagnostics(uri),
+        json!([vulnerabilities(
+            range(1, 10, 1, 16),
+            2,
+            "GHSA-test",
+            "2 known vulnerabilities (1 high): GHSA-test, GHSA-stdlib",
+        )])
+    );
+}
+
+#[test]
+fn never_sends_a_module_of_a_configured_repository() {
+    let first = Repository::new(FIRST_REPOSITORY, None);
+    let second = Repository::new(SECOND_REPOSITORY, None);
+    // okhttp is also on the second repository, but the private one answers first.
+    let private = Repository::new(
+        &[
+            ("com/example/missing", &["1.0", "1.1"]),
+            ("com/squareup/okhttp3/okhttp", &["4.11.0", "4.12.0"]),
+        ],
+        None,
+    );
+    let osv = Osv::new();
+    let options = json!({ "repositories": [{ "url": private.url }] });
+    let mut server = Server::checking(&[&first, &second], &osv, options);
+    let diagnostics = server.diagnostics(CATALOG_URI);
+    assert_eq!(diagnostics.as_array().unwrap().len(), 1);
+    assert_eq!(diagnostics[0]["code"], "GHSA-stdlib");
+    assert_eq!(
+        osv.queried(),
+        [
+            "androidx.core:core-ktx@1.13.1",
+            "org.jetbrains.kotlin:kotlin-stdlib@2.0.21",
+        ]
+    );
+}
+
+#[test]
+fn sends_nothing_to_osv_when_turned_off() {
+    let first = Repository::new(FIRST_REPOSITORY, None);
+    let second = Repository::new(SECOND_REPOSITORY, None);
+    let osv = Osv::new();
+    let mut server = Server::spawn(&[&first, &second], &[("GRADLE_CATALOG_LSP_OSV", &osv.url)]);
+    let result = server.initialize(json!({
+        "capabilities": { "workspace": { "diagnostics": { "refreshSupport": true } } },
+        "initializationOptions": { "vulnerabilities": false },
+    }));
+    assert_eq!(result["capabilities"].get("diagnosticProvider"), None);
+    server.open(CATALOG_URI, CATALOG);
+    assert_eq!(server.labels(), ["→ 4.12.0", "→ 2.1.0"]);
+    assert_eq!(server.diagnostics(CATALOG_URI), json!([]));
+    thread::sleep(TTL * 3);
+    server.hints(CATALOG_URI);
+    assert!(server.requests.is_empty());
+    assert!(osv.queried().is_empty());
+}
+
+#[test]
+fn leaves_the_versions_without_a_diagnostic_when_osv_fails() {
+    let first = Repository::new(FIRST_REPOSITORY, None);
+    let second = Repository::new(SECOND_REPOSITORY, None);
+    let osv = Osv::new();
+    osv.fail();
+    let mut server = Server::checking(&[&first, &second], &osv, json!({}));
+    assert_eq!(server.diagnostics(CATALOG_URI), json!([]));
+    let errors = server.stop();
+    let failed = format!(
+        "{}/v1/query (com.squareup.okhttp3:okhttp:4.11.0): http status: 500",
+        osv.url
+    );
+    assert!(errors.lines().any(|line| line == failed), "{errors}");
+}
+
+#[test]
+fn keeps_the_known_vulnerabilities_when_osv_stops_answering() {
+    let first = Repository::new(FIRST_REPOSITORY, None);
+    let second = Repository::new(SECOND_REPOSITORY, None);
+    let osv = Osv::new();
+    let mut server = Server::checking(&[&first, &second], &osv, json!({}));
+    let diagnostics = server.diagnostics(CATALOG_URI);
+    assert_eq!(diagnostics.as_array().unwrap().len(), 2);
+    osv.fail();
+    thread::sleep(TTL);
+    assert_eq!(server.diagnostics(CATALOG_URI), diagnostics);
+    assert_eq!(osv.queried().len(), 6);
 }
