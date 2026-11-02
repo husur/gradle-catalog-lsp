@@ -59,7 +59,8 @@ impl Repository {
     }
 }
 
-static REPOSITORIES: OnceLock<Vec<Repository>> = OnceLock::new();
+/// The repositories from the settings, then the default ones.
+static REPOSITORIES: OnceLock<(Vec<Repository>, Vec<Repository>)> = OnceLock::new();
 
 /// Queries the repositories configured in the initialization options first, then the default ones.
 /// The tests serve the metadata from local servers, listed in `GRADLE_CATALOG_LSP_REPOSITORIES`
@@ -78,7 +79,7 @@ pub fn configure(options: Option<&Value>) {
         url,
         authorization: None,
     });
-    let _ = REPOSITORIES.set(configured.chain(defaults).collect());
+    let _ = REPOSITORIES.set((configured.collect(), defaults.collect()));
 }
 
 /// Reads a property the way Gradle does for `credentials(PasswordCredentials)`: from
@@ -111,30 +112,53 @@ static AGENT: LazyLock<ureq::Agent> = LazyLock::new(|| {
 
 /// The URL of the first repository that knows the module, with the versions it lists.
 pub fn fetch(module: &Module) -> Option<(&'static str, Vec<String>)> {
+    let (configured, defaults) = REPOSITORIES.get()?;
     let path = format!(
         "{}/{}/maven-metadata.xml",
         module.group.replace('.', "/"),
         module.name
     );
-    let (repository, metadata) = REPOSITORIES.get()?.iter().find_map(|repository| {
-        let url = format!("{}/{path}", repository.url);
-        let mut request = AGENT.get(&url);
-        if let Some(authorization) = &repository.authorization {
-            request = request.header("Authorization", authorization);
-        }
-        request
-            .call()
-            .and_then(|mut response| response.body_mut().read_to_string())
-            // Zed shows stderr in the language server logs. A 404 only means that the module
-            // lives in another repository.
-            .inspect_err(|error| {
-                if !matches!(error, ureq::Error::StatusCode(404)) {
-                    eprintln!("{url}: {error}");
-                }
-            })
-            .ok()
-            .map(|metadata| (repository.url.as_str(), metadata))
-    })?;
+    // Like Gradle, which resolves plugins on the Plugin Portal first. It hosts the plugins that
+    // have a page there, and redirects to Maven Central for the others.
+    let (portal, others): (Vec<_>, Vec<_>) = defaults
+        .iter()
+        .partition(|repository| module.plugin().is_some() && repository.url == PLUGIN_PORTAL);
+    let configured = configured.iter().map(|repository| (repository, true));
+    let defaults = portal
+        .into_iter()
+        .chain(others)
+        .map(|repository| (repository, false));
+    let found = configured
+        .chain(defaults)
+        .find_map(|(repository, follow_redirects)| {
+            let url = format!("{}/{path}", repository.url);
+            let mut request = AGENT.get(&url);
+            if let Some(authorization) = &repository.authorization {
+                request = request.header("Authorization", authorization);
+            }
+            // A default repository that redirects does not host the module, which the next ones
+            // answer. A repository from the settings can redirect to the storage of its files.
+            if !follow_redirects {
+                request = request.config().max_redirects(0).build();
+            }
+            request
+                .call()
+                .and_then(|mut response| {
+                    let metadata = response.body_mut().read_to_string()?;
+                    Ok((!response.status().is_redirection()).then_some(metadata))
+                })
+                // Zed shows stderr in the language server logs. A 404 only means that the module
+                // lives in another repository.
+                .inspect_err(|error| {
+                    if !matches!(error, ureq::Error::StatusCode(404)) {
+                        eprintln!("{url}: {error}");
+                    }
+                })
+                .ok()
+                .flatten()
+                .map(|metadata| (repository.url.as_str(), metadata))
+        });
+    let (repository, metadata) = found?;
     let versions = metadata
         .split("<version>")
         .skip(1)

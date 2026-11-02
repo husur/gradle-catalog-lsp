@@ -27,8 +27,9 @@ hint would suggest for it alone, or "up to date", and the newest pre-release whe
 one. For a `version.ref` shared by several modules, this tells which one holds the hint back.
 
 A module found on Maven Central, Google Maven or the Gradle Plugin Portal links to the page of the
-version you use, to read about a release before applying it. A module from a private repository
-gets no link, since its URL can be internal.
+version you use, to read about a release before applying it. A plugin published on the Plugin
+Portal links to its page there. A module from a private repository gets no link, since its URL can
+be internal.
 
 ## Installation
 

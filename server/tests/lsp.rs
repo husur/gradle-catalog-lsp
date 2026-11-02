@@ -61,6 +61,8 @@ const AUTHORIZATION: &str = "Basic YWNtZTpzM2NyM3Q=";
 struct Repository {
     url: String,
     artifacts: Arc<Mutex<HashMap<String, Vec<String>>>>,
+    /// Paths answered with a redirect to the URL they map to.
+    redirects: Arc<Mutex<HashMap<String, String>>>,
     /// The request and header lines received, oldest first.
     received: Arc<Mutex<Vec<String>>>,
 }
@@ -72,12 +74,14 @@ impl Repository {
         let repository = Self {
             url: format!("http://{}", listener.local_addr().unwrap()),
             artifacts: Arc::default(),
+            redirects: Arc::default(),
             received: Arc::default(),
         };
         for (artifact, versions) in artifacts {
             repository.publish(artifact, versions);
         }
         let served = Arc::clone(&repository.artifacts);
+        let redirects = Arc::clone(&repository.redirects);
         let received = Arc::clone(&repository.received);
         thread::spawn(move || {
             for mut stream in listener.incoming().flatten() {
@@ -98,12 +102,16 @@ impl Repository {
                         })
                     })
                 });
-                let response = match served.lock().unwrap().get(path) {
+                let redirect = redirects.lock().unwrap().get(path).cloned();
+                let response = match (redirect, served.lock().unwrap().get(path)) {
                     _ if !authorized => {
                         "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
                             .to_string()
                     }
-                    Some(versions) => {
+                    (Some(location), _) => format!(
+                        "HTTP/1.1 303 See Other\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    ),
+                    (None, Some(versions)) => {
                         let versions: String = versions
                             .iter()
                             .map(|version| format!("<version>{version}</version>"))
@@ -116,7 +124,7 @@ impl Repository {
                             body.len()
                         )
                     }
-                    None => {
+                    (None, None) => {
                         "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
                             .to_string()
                     }
@@ -132,6 +140,12 @@ impl Repository {
             format!("/{artifact}/maven-metadata.xml"),
             versions.iter().map(|v| v.to_string()).collect(),
         );
+    }
+
+    fn redirect(&self, artifact: &str, to: &Repository) {
+        let path = format!("/{artifact}/maven-metadata.xml");
+        let location = format!("{}{path}", to.url);
+        self.redirects.lock().unwrap().insert(path, location);
     }
 
     fn empty(&self) {
@@ -612,6 +626,27 @@ fn queries_the_configured_repositories_before_the_default_ones() {
     let mut server = Server::configured(&[&first, &second], &[], configured);
     // The second repository has okhttp too, up to 4.12.0.
     assert_eq!(server.labels(), ["→ 4.13.0", "→ 1.1", "→ 2.1.0"]);
+}
+
+#[test]
+fn follows_redirects_from_the_configured_repositories_only() {
+    // Like the Plugin Portal, which redirects to Maven Central for the plugins it does not host.
+    let target = Repository::new(
+        &[("com/squareup/okhttp3/okhttp", &["4.11.0", "9.9.9"])],
+        None,
+    );
+    let redirecting = Repository::new(&[], None);
+    redirecting.redirect("com/squareup/okhttp3/okhttp", &target);
+    let first = Repository::new(FIRST_REPOSITORY, None);
+    let second = Repository::new(SECOND_REPOSITORY, None);
+    let mut server = Server::start_with(&[&redirecting, &first, &second], json!({}));
+    assert_eq!(server.labels(), ["→ 4.12.0", "→ 2.1.0"]);
+    assert!(target.received().is_empty());
+    assert_eq!(server.stop(), "");
+
+    let configured = json!([{ "url": redirecting.url }]);
+    let mut server = Server::configured(&[&first, &second], &[], configured);
+    assert_eq!(server.labels(), ["→ 9.9.9", "→ 2.1.0"]);
 }
 
 #[test]
