@@ -1,4 +1,4 @@
-use gradle_catalog_lsp::versions::{compare, latest, prerelease};
+use gradle_catalog_lsp::versions::{compare, is_prerelease, latest, prerelease};
 
 fn latest_of(current: &str, available: &[&str]) -> Option<String> {
     let available: Vec<String> = available.iter().map(|v| v.to_string()).collect();
@@ -47,6 +47,8 @@ fn suggests_the_newest_version_of_the_same_kind() {
     let lifecycle = ["2.10.0", "2.11.0-rc01", "2.11.0", "2.12.0-alpha05"];
     assert_eq!(latest_of("2.10.0", &lifecycle).as_deref(), Some("2.11.0"));
     assert_eq!(latest_of("2.11.0", &lifecycle), None);
+    // An empty version, while it is being typed, gets the newest stable one.
+    assert_eq!(latest_of("", &lifecycle).as_deref(), Some("2.11.0"));
     assert_eq!(
         latest_of("2.12.0-alpha01", &lifecycle).as_deref(),
         Some("2.12.0-alpha05")
@@ -84,4 +86,19 @@ fn finds_the_newest_prerelease_of_the_same_flavor() {
         prerelease_of("33.3.1-jre", &guava).as_deref(),
         Some("34.0.0-rc1-jre")
     );
+}
+
+#[test]
+fn tells_the_prereleases_apart() {
+    for version in [
+        "2.12.0-alpha05",
+        "2.11.0-RC01",
+        "1.0-SNAPSHOT",
+        "34.0.0-rc1-jre",
+    ] {
+        assert!(is_prerelease(version), "{version}");
+    }
+    for version in ["2.11.0", "33.4.0-android", "2.0.21-1.0.27", ""] {
+        assert!(!is_prerelease(version), "{version}");
+    }
 }

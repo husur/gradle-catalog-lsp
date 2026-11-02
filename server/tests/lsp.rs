@@ -410,6 +410,17 @@ impl Server {
         .unwrap()
     }
 
+    fn complete(&mut self, uri: &str, line: u32, character: u32) -> Value {
+        self.request(
+            "textDocument/completion",
+            json!({
+                "textDocument": { "uri": uri },
+                "position": { "line": line, "character": character },
+            }),
+        )
+        .unwrap()
+    }
+
     fn diagnostics(&mut self, uri: &str) -> Value {
         let report = self
             .request(
@@ -489,6 +500,10 @@ fn introduces_itself_and_its_capabilities() {
     assert_eq!(result["capabilities"]["inlayHintProvider"], true);
     assert_eq!(result["capabilities"]["codeActionProvider"], true);
     assert_eq!(result["capabilities"]["hoverProvider"], true);
+    assert_eq!(
+        result["capabilities"]["completionProvider"],
+        json!({ "triggerCharacters": ["\""] })
+    );
     assert_eq!(
         result["capabilities"]["diagnosticProvider"],
         json!({ "interFileDependencies": false, "workspaceDiagnostics": false })
@@ -609,6 +624,104 @@ fn shows_nothing_outside_the_versions_without_querying_the_repositories() {
     assert!(second.received().is_empty());
 }
 
+/// The items for `versions`, in this order, each replacing `range` and filtered behind `word`.
+fn completion(range: Value, word: &str, versions: &[(&str, Option<&str>)]) -> Value {
+    let items: Vec<Value> = versions
+        .iter()
+        .enumerate()
+        .map(|(index, (version, mark))| {
+            let mut item = json!({
+                "label": version,
+                "sortText": format!("{index:05}"),
+                "filterText": format!("{word}{version}"),
+                "textEdit": { "range": range, "newText": version },
+            });
+            if let Some(mark) = mark {
+                item["detail"] = json!(mark);
+            }
+            item
+        })
+        .collect();
+    json!(items)
+}
+
+#[test]
+fn completes_the_published_versions_newest_first() {
+    let mut server = Server::start();
+    // The shared `kotlin` ref leaves out the 2.2.0 that the plugin lacks. The `21` before the cursor
+    // starts every filter text.
+    assert_eq!(
+        server.complete(CATALOG_URI, 1, 16),
+        completion(
+            range(1, 10, 1, 16),
+            "21",
+            &[("2.1.0", Some("latest")), ("2.0.21", Some("current"))],
+        )
+    );
+    assert_eq!(
+        server.complete(CATALOG_URI, 5, 36),
+        completion(
+            range(5, 36, 5, 42),
+            "",
+            &[
+                ("5.0.0-alpha.14", Some("pre-release")),
+                ("4.12.0", Some("latest")),
+                ("4.11.0", Some("current")),
+            ],
+        )
+    );
+    assert_eq!(
+        server.complete(CATALOG_URI, 6, 67),
+        completion(
+            range(6, 64, 6, 70),
+            "1",
+            &[
+                ("1.14.0-alpha01", Some("pre-release")),
+                ("1.13.1", Some("current")),
+                ("1.12.0", None),
+            ],
+        )
+    );
+    assert_eq!(server.complete(CATALOG_URI, 7, 32), json!([]));
+}
+
+#[test]
+fn completes_an_empty_version_without_hinting_it() {
+    let mut server = Server::start();
+    let uri = "file:///project/gradle/new.versions.toml";
+    server.open(
+        uri,
+        "[libraries]\ncore = { module = \"androidx.core:core-ktx\", version = \"\" }\n",
+    );
+    assert_eq!(
+        server.complete(uri, 1, 55),
+        completion(
+            range(1, 55, 1, 55),
+            "",
+            &[
+                ("1.14.0-alpha01", Some("pre-release")),
+                ("1.13.1", Some("latest")),
+                ("1.12.0", None),
+            ],
+        )
+    );
+    assert_eq!(server.hints(uri), json!([]));
+    assert_eq!(server.actions(uri, 1), json!([]));
+    assert_eq!(server.hover(uri, 1, 55), Value::Null);
+}
+
+#[test]
+fn completes_nothing_outside_the_versions_without_querying_the_repositories() {
+    let first = Repository::new(FIRST_REPOSITORY, None);
+    let second = Repository::new(SECOND_REPOSITORY, None);
+    let mut server = Server::start_with(&[&first, &second], json!({}));
+    for (line, character) in [(0, 3), (5, 20), (5, 35), (4, 75)] {
+        assert_eq!(server.complete(CATALOG_URI, line, character), json!([]));
+    }
+    assert!(first.received().is_empty());
+    assert!(second.received().is_empty());
+}
+
 #[test]
 fn follows_the_catalog_as_it_is_edited_and_closed() {
     let mut server = Server::start();
@@ -662,6 +775,10 @@ fn rejects_unknown_methods_and_invalid_params() {
     );
     assert_eq!(
         code(server.request("textDocument/codeAction", json!({}))),
+        -32602
+    );
+    assert_eq!(
+        code(server.request("textDocument/completion", json!({}))),
         -32602
     );
 }
