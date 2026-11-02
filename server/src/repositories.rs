@@ -11,11 +11,10 @@ use ureq::http::Uri;
 
 use crate::catalog::Module;
 
-const DEFAULT_REPOSITORIES: [&str; 3] = [
-    "https://repo1.maven.org/maven2",
-    "https://dl.google.com/dl/android/maven2",
-    "https://plugins.gradle.org/m2",
-];
+const MAVEN_CENTRAL: &str = "https://repo1.maven.org/maven2";
+const GOOGLE_MAVEN: &str = "https://dl.google.com/dl/android/maven2";
+const PLUGIN_PORTAL: &str = "https://plugins.gradle.org/m2";
+const DEFAULT_REPOSITORIES: [&str; 3] = [MAVEN_CENTRAL, GOOGLE_MAVEN, PLUGIN_PORTAL];
 
 pub struct Repository {
     url: String,
@@ -110,40 +109,55 @@ static AGENT: LazyLock<ureq::Agent> = LazyLock::new(|| {
         .into()
 });
 
-pub fn fetch(module: &Module) -> Vec<String> {
+/// The URL of the first repository that knows the module, with the versions it lists.
+pub fn fetch(module: &Module) -> Option<(&'static str, Vec<String>)> {
     let path = format!(
         "{}/{}/maven-metadata.xml",
         module.group.replace('.', "/"),
         module.name
     );
-    REPOSITORIES
-        .get()
-        .into_iter()
-        .flatten()
-        .find_map(|repository| {
-            let url = format!("{}/{path}", repository.url);
-            let mut request = AGENT.get(&url);
-            if let Some(authorization) = &repository.authorization {
-                request = request.header("Authorization", authorization);
-            }
-            request
-                .call()
-                .and_then(|mut response| response.body_mut().read_to_string())
-                // Zed shows stderr in the language server logs. A 404 only means that the module
-                // lives in another repository.
-                .inspect_err(|error| {
-                    if !matches!(error, ureq::Error::StatusCode(404)) {
-                        eprintln!("{url}: {error}");
-                    }
-                })
-                .ok()
-        })
-        .map(|metadata| {
-            metadata
-                .split("<version>")
-                .skip(1)
-                .filter_map(|tail| Some(tail.split_once("</version>")?.0.trim().to_string()))
-                .collect()
-        })
-        .unwrap_or_default()
+    let (repository, metadata) = REPOSITORIES.get()?.iter().find_map(|repository| {
+        let url = format!("{}/{path}", repository.url);
+        let mut request = AGENT.get(&url);
+        if let Some(authorization) = &repository.authorization {
+            request = request.header("Authorization", authorization);
+        }
+        request
+            .call()
+            .and_then(|mut response| response.body_mut().read_to_string())
+            // Zed shows stderr in the language server logs. A 404 only means that the module
+            // lives in another repository.
+            .inspect_err(|error| {
+                if !matches!(error, ureq::Error::StatusCode(404)) {
+                    eprintln!("{url}: {error}");
+                }
+            })
+            .ok()
+            .map(|metadata| (repository.url.as_str(), metadata))
+    })?;
+    let versions = metadata
+        .split("<version>")
+        .skip(1)
+        .filter_map(|tail| Some(tail.split_once("</version>")?.0.trim().to_string()))
+        .collect();
+    Some((repository, versions))
+}
+
+/// The page of a version of the module on the website of the default repository it was found in.
+/// A repository from the settings gets none: its URL can be internal, and there is no standard
+/// page layout. Neither does a library found on the Plugin Portal, which only lists its files.
+pub fn page(repository: &str, module: &Module, version: &str) -> Option<String> {
+    let Module { group, name } = module;
+    match (repository, module.plugin()) {
+        (MAVEN_CENTRAL, _) => Some(format!(
+            "https://central.sonatype.com/artifact/{group}/{name}/{version}"
+        )),
+        (GOOGLE_MAVEN, _) => Some(format!(
+            "https://maven.google.com/web/index.html#{group}:{name}:{version}"
+        )),
+        (PLUGIN_PORTAL, Some(id)) => {
+            Some(format!("https://plugins.gradle.org/plugin/{id}/{version}"))
+        }
+        _ => None,
+    }
 }

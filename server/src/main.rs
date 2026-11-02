@@ -4,6 +4,7 @@
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::error::Error;
+use std::slice;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -15,9 +16,10 @@ use lsp_server::{Connection, ErrorCode, Message, Notification, Request, Response
 use lsp_types::{
     CodeAction, CodeActionKind, CodeActionOrCommand, CodeActionParams,
     CodeActionProviderCapability, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
-    DidOpenTextDocumentParams, InitializeParams, InitializeResult, InlayHint, InlayHintLabel,
-    InlayHintParams, InlayHintTooltip, OneOf, Position, Range, ServerCapabilities, ServerInfo,
-    TextDocumentSyncKind, TextEdit, Uri, WorkspaceEdit,
+    DidOpenTextDocumentParams, Hover, HoverContents, HoverParams, HoverProviderCapability,
+    InitializeParams, InitializeResult, InlayHint, InlayHintLabel, InlayHintParams,
+    InlayHintTooltip, MarkupContent, MarkupKind, OneOf, Position, Range, ServerCapabilities,
+    ServerInfo, TextDocumentPositionParams, TextDocumentSyncKind, TextEdit, Uri, WorkspaceEdit,
 };
 use serde_json::from_value;
 
@@ -36,6 +38,7 @@ fn delay(default: Duration) -> Duration {
 
 struct Fetched {
     versions: Vec<String>,
+    repository: Option<&'static str>,
     // Not an `Instant`, which stops while a Mac sleeps: a night away would not count.
     at: SystemTime,
 }
@@ -72,6 +75,7 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             text_document_sync: Some(TextDocumentSyncKind::FULL.into()),
             inlay_hint_provider: Some(OneOf::Left(true)),
             code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
+            hover_provider: Some(HoverProviderCapability::Simple(true)),
             ..Default::default()
         },
         server_info: Some(ServerInfo {
@@ -145,13 +149,41 @@ fn handle(
             };
             Response::new_ok(id, code_actions(documents, cache, params))
         }
+        "textDocument/hover" => {
+            let Ok(params) = from_value::<HoverParams>(params) else {
+                return invalid(connection, id);
+            };
+            let TextDocumentPositionParams {
+                text_document,
+                position,
+            } = params.text_document_position_params;
+            let text = documents.get(&text_document.uri).map_or("", String::as_str);
+            let hovered = catalog::parse(text)
+                .into_iter()
+                .map(|entry| (range(text, &entry), entry))
+                .find(|(range, _)| (range.start..=range.end).contains(&position));
+            let Some((range, entry)) = hovered else {
+                return send(connection, Response::new_ok(id, ()));
+            };
+            let (sender, cache) = (connection.sender.clone(), cache.clone());
+            thread::spawn(move || {
+                resolve(slice::from_ref(&entry), &cache);
+                let hover = hover(&entry, range, &cache.lock().unwrap());
+                let _ = sender.send(Response::new_ok(id, hover).into());
+            });
+            return;
+        }
         _ => Response::new_err(id, ErrorCode::MethodNotFound as i32, method),
     };
-    let _ = connection.sender.send(response.into());
+    send(connection, response);
 }
 
 fn invalid(connection: &Connection, id: lsp_server::RequestId) {
     let response = Response::new_err(id, ErrorCode::InvalidParams as i32, "invalid params".into());
+    send(connection, response);
+}
+
+fn send(connection: &Connection, response: Response) {
     let _ = connection.sender.send(response.into());
 }
 
@@ -204,6 +236,50 @@ fn inlay_hints(text: &str, cache: &Cache) -> Vec<InlayHint> {
             })
         })
         .collect()
+}
+
+fn hover(entry: &Entry, range: Range, cache: &HashMap<Module, Fetched>) -> Hover {
+    let modules: Vec<String> = entry
+        .modules
+        .iter()
+        .map(|module| describe(module, &entry.version, cache.get(module)))
+        .collect();
+    Hover {
+        contents: HoverContents::Markup(MarkupContent {
+            kind: MarkupKind::Markdown,
+            value: modules.join("\n\n"),
+        }),
+        range: Some(range),
+    }
+}
+
+fn describe(module: &Module, version: &str, fetched: Option<&Fetched>) -> String {
+    let name = match module.plugin() {
+        Some(id) => format!("`{id}`"),
+        None => format!("`{}:{}`", module.group, module.name),
+    };
+    let Some(fetched) = fetched.filter(|fetched| !fetched.versions.is_empty()) else {
+        return format!("{name}: not found in any repository");
+    };
+    let page = fetched
+        .repository
+        .and_then(|repository| repositories::page(repository, module, version));
+    let name = match page {
+        Some(page) => format!("[{name}]({page})"),
+        None => name,
+    };
+    let update = versions::latest(version, &fetched.versions);
+    let status = match update {
+        Some(update) => format!("{name}: update to {update}"),
+        None => format!("{name}: up to date"),
+    };
+    let prerelease = versions::prerelease(version, &fetched.versions).filter(|prerelease| {
+        update.is_none_or(|update| versions::compare(prerelease, update).is_gt())
+    });
+    match prerelease {
+        Some(prerelease) => format!("{status}, newest pre-release {prerelease}"),
+        None => status,
+    }
 }
 
 fn code_actions(
@@ -268,8 +344,10 @@ fn resolve(entries: &[Entry], cache: &Cache) {
     thread::scope(|scope| {
         for module in stale {
             scope.spawn(move || {
+                let (repository, versions) = repositories::fetch(module).unzip();
                 let fetched = Fetched {
-                    versions: repositories::fetch(module),
+                    versions: versions.unwrap_or_default(),
+                    repository,
                     at: SystemTime::now(),
                 };
                 let mut cache = cache.lock().unwrap();

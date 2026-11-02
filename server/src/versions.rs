@@ -17,13 +17,40 @@ const PRERELEASES: [&str; 12] = [
 
 pub fn latest<'a>(current: &str, available: &'a [String]) -> Option<&'a str> {
     let flavor = qualifiers(current);
-    let prerelease = flavor.iter().any(|q| PRERELEASES.contains(&q.as_str()));
+    let prerelease = flavor.iter().any(|q| is_prerelease(q));
+    newest(current, available, |candidate| {
+        prerelease || qualifiers(candidate) == flavor
+    })
+}
+
+/// The newest pre-release of the flavor of `current` (Guava `-android` or `-jre`) newer than it.
+pub fn prerelease<'a>(current: &str, available: &'a [String]) -> Option<&'a str> {
+    let (_, flavor): (Vec<_>, Vec<_>) = qualifiers(current)
+        .into_iter()
+        .partition(|q| is_prerelease(q));
+    newest(current, available, |candidate| {
+        let (prerelease, other): (Vec<_>, Vec<_>) = qualifiers(candidate)
+            .into_iter()
+            .partition(|q| is_prerelease(q));
+        !prerelease.is_empty() && other == flavor
+    })
+}
+
+fn newest<'a>(
+    current: &str,
+    available: &'a [String],
+    eligible: impl Fn(&str) -> bool,
+) -> Option<&'a str> {
     available
         .iter()
         .map(String::as_str)
-        .filter(|candidate| prerelease || qualifiers(candidate) == flavor)
+        .filter(|candidate| eligible(candidate))
         .max_by(|a, b| compare(a, b))
         .filter(|newest| compare(newest, current).is_gt())
+}
+
+fn is_prerelease(qualifier: &str) -> bool {
+    PRERELEASES.contains(&qualifier)
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]

@@ -9,6 +9,13 @@ pub struct Module {
     pub name: String,
 }
 
+impl Module {
+    /// The plugin id, when the module is the marker artifact of a plugin.
+    pub fn plugin(&self) -> Option<&str> {
+        (self.name.strip_suffix(".gradle.plugin") == Some(&self.group)).then_some(&self.group)
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub struct Entry {
     pub version: String,
