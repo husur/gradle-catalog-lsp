@@ -25,7 +25,7 @@ use lsp_types::{
     NumberOrString, OneOf, Position, Range, ServerCapabilities, ServerInfo,
     TextDocumentPositionParams, TextDocumentSyncKind, TextEdit, Uri, WorkspaceEdit,
 };
-use serde_json::{from_value, json};
+use serde_json::{Value, from_value, json};
 
 const FOUND_TTL: Duration = Duration::from_secs(60 * 60);
 const MISSING_TTL: Duration = Duration::from_secs(5 * 60);
@@ -78,12 +78,16 @@ type Advisories = Arc<Mutex<HashMap<Query, Checked>>>;
 fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let (connection, io_threads) = Connection::stdio();
     let (initialize_id, initialize_params) = connection.initialize_start()?;
+    // lsp-types reads the `workspace.diagnostics` capability of the specification as `diagnostic`.
+    let diagnostic_refresh = initialize_params
+        .pointer("/capabilities/workspace/diagnostics/refreshSupport")
+        == Some(&Value::Bool(true));
     let InitializeParams {
         capabilities,
         initialization_options,
         ..
     } = from_value(initialize_params).unwrap_or_default();
-    let refresh_support = capabilities
+    let hint_refresh = capabilities
         .workspace
         .and_then(|workspace| workspace.inlay_hint?.refresh_support)
         .unwrap_or(false);
@@ -106,17 +110,30 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     };
     connection.initialize_finish(initialize_id, serde_json::to_value(initialize_result)?)?;
 
-    // Zed only asks for hints on open, edit and scroll, so a catalog left open would never show a
-    // release. The thread holds a sender, which `io_threads.join()` waits for: dropping `stop` ends it.
+    // Zed only asks for hints and diagnostics on open, edit and scroll, so a catalog left open would
+    // never show a release or an advisory. The thread holds a sender, which `io_threads.join()`
+    // waits for: dropping `stop` ends it.
     let (stop, stopped) = mpsc::channel::<()>();
-    if refresh_support {
+    let refreshes: Vec<&str> = [
+        (hint_refresh, "workspace/inlayHint/refresh"),
+        (
+            diagnostic_refresh && osv::enabled(),
+            "workspace/diagnostic/refresh",
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(supported, method)| supported.then_some(method))
+    .collect();
+    if !refreshes.is_empty() {
         let sender = connection.sender.clone();
         thread::spawn(move || {
             let mut id = 0;
             while let Err(RecvTimeoutError::Timeout) = stopped.recv_timeout(delay(REFRESH_PERIOD)) {
-                id += 1;
-                let refresh = Request::new(id.into(), "workspace/inlayHint/refresh".into(), ());
-                let _ = sender.send(refresh.into());
+                for method in &refreshes {
+                    id += 1;
+                    let refresh = Request::new(id.into(), method.to_string(), ());
+                    let _ = sender.send(refresh.into());
+                }
             }
         });
     }

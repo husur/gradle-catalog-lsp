@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
@@ -712,18 +712,23 @@ fn keeps_the_known_versions_when_the_repositories_stop_answering() {
 }
 
 #[test]
-fn asks_zed_to_refresh_the_hints_when_it_supports_it() {
-    let refresh_support = json!({ "workspace": { "inlayHint": { "refreshSupport": true } } });
+fn asks_zed_to_refresh_the_hints_and_diagnostics_when_it_supports_it() {
+    let refresh_support = json!({ "workspace": {
+        "inlayHint": { "refreshSupport": true },
+        "diagnostics": { "refreshSupport": true },
+    } });
     let first = Repository::new(FIRST_REPOSITORY, None);
     let mut server = Server::start_with(&[&first], refresh_support);
     thread::sleep(TTL * 3);
     server.hints(CATALOG_URI);
-    assert!(server.requests.len() >= 2);
-    assert!(
-        server
-            .requests
-            .iter()
-            .all(|method| method == "workspace/inlayHint/refresh")
+    assert!(server.requests.len() >= 4);
+    let methods: HashSet<&str> = server.requests.iter().map(String::as_str).collect();
+    assert_eq!(
+        methods,
+        HashSet::from([
+            "workspace/inlayHint/refresh",
+            "workspace/diagnostic/refresh"
+        ])
     );
 
     assert_eq!(
@@ -980,13 +985,16 @@ fn sends_nothing_to_osv_when_turned_off() {
     let osv = Osv::new();
     let mut server = Server::spawn(&[&first, &second], &[("GRADLE_CATALOG_LSP_OSV", &osv.url)]);
     let result = server.initialize(json!({
-        "capabilities": {},
+        "capabilities": { "workspace": { "diagnostics": { "refreshSupport": true } } },
         "initializationOptions": { "vulnerabilities": false },
     }));
     assert_eq!(result["capabilities"].get("diagnosticProvider"), None);
     server.open(CATALOG_URI, CATALOG);
     assert_eq!(server.labels(), ["→ 4.12.0", "→ 2.1.0"]);
     assert_eq!(server.diagnostics(CATALOG_URI), json!([]));
+    thread::sleep(TTL * 3);
+    server.hints(CATALOG_URI);
+    assert!(server.requests.is_empty());
     assert!(osv.queried().is_empty());
 }
 
