@@ -103,7 +103,7 @@ fn gradle_property(name: &str) -> Option<String> {
         })
 }
 
-static AGENT: LazyLock<ureq::Agent> = LazyLock::new(|| {
+pub(crate) static AGENT: LazyLock<ureq::Agent> = LazyLock::new(|| {
     ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(10)))
         .build()
@@ -165,6 +165,13 @@ pub fn fetch(module: &Module) -> Option<(&'static str, Vec<String>)> {
         .filter_map(|tail| Some(tail.split_once("</version>")?.0.trim().to_string()))
         .collect();
     Some((repository, versions))
+}
+
+/// Whether the repository is a default, public one rather than one from the settings.
+pub fn is_default(repository: &str) -> bool {
+    REPOSITORIES
+        .get()
+        .is_some_and(|(_, defaults)| defaults.iter().any(|default| default.url == repository))
 }
 
 /// The page of a version of the module on the website of the default repository it was found in.

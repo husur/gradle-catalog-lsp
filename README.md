@@ -1,7 +1,8 @@
 # Gradle Version Catalog for Zed
 
 Shows newer versions of the libraries and plugins declared in Gradle version catalogs
-(`gradle/libs.versions.toml`), right next to the version you use.
+(`gradle/libs.versions.toml`), right next to the version you use, and warns about its known
+vulnerabilities.
 
 ```toml
 [versions]
@@ -30,6 +31,33 @@ A module found on Maven Central, Google Maven or the Gradle Plugin Portal links 
 version you use, to read about a release before applying it. A plugin published on the Plugin
 Portal links to its page there. A module from a private repository gets no link, since its URL can
 be internal.
+
+## Known vulnerabilities
+
+A version with known vulnerabilities, looked up on [OSV](https://osv.dev), gets a diagnostic that
+counts them and lists their ids, the most severe first: a warning when one of them is rated high or
+critical, a note otherwise. Its code links to the most severe advisory. The hint keeps suggesting
+the newest version, which fixes them in most cases. Zed asks for these diagnostics unless
+`diagnostics.lsp_pull_diagnostics.enabled` is `false` in your settings.
+
+For each library found on Maven Central, Google Maven or the Gradle Plugin Portal, its coordinates
+and the version written in the catalog (`com.squareup.okhttp3:okhttp` and `4.11.0`) are sent to the
+[OSV API](https://google.github.io/osv.dev/api/), run by Google. Nothing else is: not the catalog,
+not the plugins, which OSV does not track, and never a module found in one of your
+[private repositories](#private-repositories), whose coordinates can be confidential. A library
+that your settings fetch from a mirror of Maven Central is therefore not checked.
+
+To send nothing to OSV, turn it off in your Zed settings:
+
+```json
+"lsp": {
+  "gradle-catalog-lsp": {
+    "initialization_options": {
+      "vulnerabilities": false
+    }
+  }
+}
+```
 
 ## Installation
 
@@ -98,8 +126,8 @@ trusting a project you didn't write.
 - Coordinates written directly in `build.gradle(.kts)` are not read, only catalogs.
 - Private repositories need Basic authentication, a username with a password or token: Bearer
   tokens and custom headers are not supported.
-- A new release can take up to an hour to show, and a module that could not be found, offline for
-  instance, is looked up again after 5 minutes.
+- A new release or advisory can take up to an hour to show, and a module that could not be found or
+  checked, offline for instance, is looked up again after 5 minutes.
 
 ## Contributing
 

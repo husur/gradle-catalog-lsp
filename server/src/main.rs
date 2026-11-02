@@ -1,6 +1,7 @@
 // lsp_types::Uri holds a Cell (from fluent_uri) but hashes only its string, so it is a safe key.
 #![allow(clippy::mutable_key_type)]
 
+use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::error::Error;
@@ -11,17 +12,20 @@ use std::thread;
 use std::time::{Duration, SystemTime};
 
 use gradle_catalog_lsp::catalog::{self, Entry, Module};
+use gradle_catalog_lsp::osv::{self, Advisory, Severity};
 use gradle_catalog_lsp::{repositories, versions};
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, Response};
 use lsp_types::{
     CodeAction, CodeActionKind, CodeActionOrCommand, CodeActionParams,
-    CodeActionProviderCapability, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
-    DidOpenTextDocumentParams, Hover, HoverContents, HoverParams, HoverProviderCapability,
-    InitializeParams, InitializeResult, InlayHint, InlayHintLabel, InlayHintParams,
-    InlayHintTooltip, MarkupContent, MarkupKind, OneOf, Position, Range, ServerCapabilities,
-    ServerInfo, TextDocumentPositionParams, TextDocumentSyncKind, TextEdit, Uri, WorkspaceEdit,
+    CodeActionProviderCapability, CodeDescription, Diagnostic, DiagnosticOptions,
+    DiagnosticServerCapabilities, DiagnosticSeverity, DidChangeTextDocumentParams,
+    DidCloseTextDocumentParams, DidOpenTextDocumentParams, DocumentDiagnosticParams, Hover,
+    HoverContents, HoverParams, HoverProviderCapability, InitializeParams, InitializeResult,
+    InlayHint, InlayHintLabel, InlayHintParams, InlayHintTooltip, MarkupContent, MarkupKind,
+    NumberOrString, OneOf, Position, Range, ServerCapabilities, ServerInfo,
+    TextDocumentPositionParams, TextDocumentSyncKind, TextEdit, Uri, WorkspaceEdit,
 };
-use serde_json::from_value;
+use serde_json::{from_value, json};
 
 const FOUND_TTL: Duration = Duration::from_secs(60 * 60);
 const MISSING_TTL: Duration = Duration::from_secs(5 * 60);
@@ -44,18 +48,32 @@ struct Fetched {
 }
 
 impl Fetched {
-    /// A clock set back since the fetch makes it stale.
     fn fresh(&self) -> bool {
-        let ttl = if self.versions.is_empty() {
-            MISSING_TTL
-        } else {
-            FOUND_TTL
-        };
-        self.at.elapsed().is_ok_and(|age| age < delay(ttl))
+        fresh(self.at, !self.versions.is_empty())
     }
 }
 
+struct Checked {
+    /// `None` when OSV failed.
+    advisories: Option<Vec<Advisory>>,
+    at: SystemTime,
+}
+
+impl Checked {
+    fn fresh(&self) -> bool {
+        fresh(self.at, self.advisories.is_some())
+    }
+}
+
+/// A clock set back since `at` makes it stale.
+fn fresh(at: SystemTime, found: bool) -> bool {
+    let ttl = if found { FOUND_TTL } else { MISSING_TTL };
+    at.elapsed().is_ok_and(|age| age < delay(ttl))
+}
+
 type Cache = Arc<Mutex<HashMap<Module, Fetched>>>;
+type Query = (Module, String);
+type Advisories = Arc<Mutex<HashMap<Query, Checked>>>;
 
 fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let (connection, io_threads) = Connection::stdio();
@@ -70,12 +88,15 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         .and_then(|workspace| workspace.inlay_hint?.refresh_support)
         .unwrap_or(false);
     repositories::configure(initialization_options.as_ref());
+    osv::configure(initialization_options.as_ref());
     let initialize_result = InitializeResult {
         capabilities: ServerCapabilities {
             text_document_sync: Some(TextDocumentSyncKind::FULL.into()),
             inlay_hint_provider: Some(OneOf::Left(true)),
             code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
             hover_provider: Some(HoverProviderCapability::Simple(true)),
+            diagnostic_provider: osv::enabled()
+                .then(|| DiagnosticServerCapabilities::Options(DiagnosticOptions::default())),
             ..Default::default()
         },
         server_info: Some(ServerInfo {
@@ -102,13 +123,14 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 
     let mut documents: HashMap<Uri, String> = HashMap::new();
     let cache = Cache::default();
+    let advisories = Advisories::default();
     for message in &connection.receiver {
         match message {
             Message::Request(request) => {
                 if connection.handle_shutdown(&request)? {
                     break;
                 }
-                handle(&connection, &documents, &cache, request);
+                handle(&connection, &documents, &cache, &advisories, request);
             }
             Message::Notification(notification) => track(&mut documents, notification),
             Message::Response(_) => {}
@@ -124,6 +146,7 @@ fn handle(
     connection: &Connection,
     documents: &HashMap<Uri, String>,
     cache: &Cache,
+    advisories: &Advisories,
     request: Request,
 ) {
     let Request { id, method, params } = request;
@@ -140,6 +163,23 @@ fn handle(
             thread::spawn(move || {
                 let hints = inlay_hints(&text, &cache);
                 let _ = sender.send(Response::new_ok(id, hints).into());
+            });
+            return;
+        }
+        "textDocument/diagnostic" => {
+            let Ok(params) = from_value::<DocumentDiagnosticParams>(params) else {
+                return invalid(connection, id);
+            };
+            let text = documents
+                .get(&params.text_document.uri)
+                .cloned()
+                .unwrap_or_default();
+            let (sender, cache, advisories) =
+                (connection.sender.clone(), cache.clone(), advisories.clone());
+            thread::spawn(move || {
+                let items = diagnostics(&text, &cache, &advisories);
+                let report = json!({ "kind": "full", "items": items });
+                let _ = sender.send(Response::new_ok(id, report).into());
             });
             return;
         }
@@ -282,6 +322,98 @@ fn describe(module: &Module, version: &str, fetched: Option<&Fetched>) -> String
     }
 }
 
+fn diagnostics(text: &str, cache: &Cache, advisories: &Advisories) -> Vec<Diagnostic> {
+    if !osv::enabled() {
+        return vec![];
+    }
+    let entries = catalog::parse(text);
+    resolve(&entries, cache);
+    // A module from a repository of the settings stays on the machine, since its coordinates can be
+    // confidential. OSV does not track the marker artifacts of plugins.
+    let queries: Vec<Vec<Query>> = {
+        let cache = cache.lock().unwrap();
+        entries
+            .iter()
+            .map(|entry| {
+                entry
+                    .modules
+                    .iter()
+                    .filter(|module| module.plugin().is_none())
+                    .filter(|module| {
+                        let repository = cache.get(*module).and_then(|fetched| fetched.repository);
+                        repository.is_some_and(repositories::is_default)
+                    })
+                    .map(|module| (module.clone(), entry.version.clone()))
+                    .collect()
+            })
+            .collect()
+    };
+    check(queries.iter().flatten(), advisories);
+    let advisories = advisories.lock().unwrap();
+    entries
+        .iter()
+        .zip(&queries)
+        .filter_map(|(entry, queries)| {
+            let found = queries
+                .iter()
+                .filter_map(|query| advisories.get(query)?.advisories.as_deref())
+                .flatten();
+            diagnostic(text, entry, found)
+        })
+        .collect()
+}
+
+/// One diagnostic per entry, for all the advisories of its modules, the most severe first.
+fn diagnostic<'a>(
+    text: &str,
+    entry: &Entry,
+    advisories: impl Iterator<Item = &'a Advisory>,
+) -> Option<Diagnostic> {
+    // An advisory can cover several modules of a project that share a `version.ref`.
+    let mut seen = HashSet::new();
+    let mut advisories: Vec<&Advisory> = advisories
+        .filter(|advisory| seen.insert(&advisory.id))
+        .collect();
+    advisories.sort_by_key(|advisory| Reverse(advisory.severity));
+    let most_severe = advisories.first()?;
+    let serious: Vec<String> = [(Severity::Critical, "critical"), (Severity::High, "high")]
+        .into_iter()
+        .filter_map(|(severity, label)| {
+            let count = advisories
+                .iter()
+                .filter(|advisory| advisory.severity == severity)
+                .count();
+            (count > 0).then(|| format!("{count} {label}"))
+        })
+        .collect();
+    let serious = match serious.is_empty() {
+        true => String::new(),
+        false => format!(" ({})", serious.join(", ")),
+    };
+    let ids: Vec<&str> = advisories
+        .iter()
+        .map(|advisory| advisory.id.as_str())
+        .collect();
+    let vulnerabilities = match ids.len() {
+        1 => "1 known vulnerability".to_string(),
+        count => format!("{count} known vulnerabilities"),
+    };
+    let severity = match most_severe.severity >= Severity::High {
+        true => DiagnosticSeverity::WARNING,
+        false => DiagnosticSeverity::INFORMATION,
+    };
+    let page = format!("https://osv.dev/vulnerability/{}", most_severe.id);
+    Some(Diagnostic {
+        range: range(text, entry),
+        severity: Some(severity),
+        code: Some(NumberOrString::String(most_severe.id.clone())),
+        code_description: page.parse().ok().map(|href| CodeDescription { href }),
+        source: Some("OSV".to_string()),
+        message: format!("{vulnerabilities}{serious}: {}", ids.join(", ")),
+        ..Default::default()
+    })
+}
+
 fn code_actions(
     documents: &HashMap<Uri, String>,
     cache: &Cache,
@@ -356,6 +488,34 @@ fn resolve(entries: &[Entry], cache: &Cache) {
                     Some(known) if fetched.versions.is_empty() => known.at = fetched.at,
                     _ => {
                         cache.insert(module.clone(), fetched);
+                    }
+                }
+            });
+        }
+    });
+}
+
+fn check<'a>(queries: impl Iterator<Item = &'a Query>, advisories: &Advisories) {
+    let stale: HashSet<&Query> = {
+        let advisories = advisories.lock().unwrap();
+        queries
+            .filter(|query| !advisories.get(*query).is_some_and(Checked::fresh))
+            .collect()
+    };
+    thread::scope(|scope| {
+        for query in stale {
+            scope.spawn(move || {
+                let (module, version) = query;
+                let checked = Checked {
+                    advisories: osv::query(module, version),
+                    at: SystemTime::now(),
+                };
+                let mut advisories = advisories.lock().unwrap();
+                match advisories.get_mut(query) {
+                    // Offline, the warnings stay rather than disappear.
+                    Some(known) if checked.advisories.is_none() => known.at = checked.at,
+                    _ => {
+                        advisories.insert(query.clone(), checked);
                     }
                 }
             });

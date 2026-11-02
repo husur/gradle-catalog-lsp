@@ -7,8 +7,9 @@ other ecosystems, [Depsy](https://github.com/mpiton/zed-depsy) is the place.
 ## Layout
 
 - `server/` is the language server: a standalone binary that talks LSP over stdio. Its
-  `src/lib.rs` holds the catalog parser (`catalog.rs`), the repository queries (`repositories.rs`)
-  and the version ordering (`versions.rs`), and `src/main.rs` the LSP loop.
+  `src/lib.rs` holds the catalog parser (`catalog.rs`), the repository queries (`repositories.rs`),
+  the vulnerability queries (`osv.rs`) and the version ordering (`versions.rs`), and `src/main.rs`
+  the LSP loop.
 - `src/lib.rs` at the root is the Zed extension, compiled to WebAssembly by Zed. It only tells Zed
   to start `gradle-catalog-lsp` on TOML files, and prefers a binary found in your `PATH` over the
   downloaded one.
@@ -25,8 +26,9 @@ cargo install --path server     # puts gradle-catalog-lsp in ~/.cargo/bin, which
 Keep `--workspace`: a plain `cargo test` at the root only tests the Zed extension, which has no tests.
 
 The tests live in `server/tests`. Those in `lsp.rs` start the server binary and talk LSP to it, with
-a local HTTP server standing in for the Maven repositories (through
-`GRADLE_CATALOG_LSP_REPOSITORIES`), so they never reach the network. `GRADLE_CATALOG_LSP_TTL_MS`
+local HTTP servers standing in for the Maven repositories (through
+`GRADLE_CATALOG_LSP_REPOSITORIES`) and for OSV (through `GRADLE_CATALOG_LSP_OSV`), so they never
+reach the network. `GRADLE_CATALOG_LSP_TTL_MS`
 shortens the cache expiry and the refresh period, so they don't wait for hours.
 
 The CI runs `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings` and the
