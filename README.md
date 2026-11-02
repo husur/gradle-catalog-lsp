@@ -20,6 +20,17 @@ Gradle. For `pom.xml` and other ecosystems, see [Depsy](https://github.com/mpito
 - Or open the code actions on the line and pick **Update to x.y.z**.
 - To apply every update of the catalog at once, pick **Update all N versions** in the same menu.
 
+## Hovering a version
+
+Hover a version to see the modules it pins (the plugin id for a plugin), each with the update the
+hint would suggest for it alone, or "up to date", and the newest pre-release when there is a newer
+one. For a `version.ref` shared by several modules, this tells which one holds the hint back.
+
+A module found on Maven Central, Google Maven or the Gradle Plugin Portal links to the page of the
+version you use, to read about a release before applying it. A plugin published on the Plugin
+Portal links to its page there. A module from a private repository gets no link, since its URL can
+be internal.
+
 ## Installation
 
 Run `zed: extensions`, search for **Gradle Version Catalog** and install it. The language server is

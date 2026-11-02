@@ -35,7 +35,10 @@ const FIRST_REPOSITORY: Artifacts = &[
         "org/jetbrains/kotlin/kotlin-stdlib",
         &["2.0.21", "2.1.0", "2.2.0"],
     ),
-    ("androidx/core/core-ktx", &["1.12.0", "1.13.1"]),
+    (
+        "androidx/core/core-ktx",
+        &["1.12.0", "1.13.1", "1.14.0-alpha01"],
+    ),
 ];
 
 const SECOND_REPOSITORY: Artifacts = &[
@@ -58,6 +61,8 @@ const AUTHORIZATION: &str = "Basic YWNtZTpzM2NyM3Q=";
 struct Repository {
     url: String,
     artifacts: Arc<Mutex<HashMap<String, Vec<String>>>>,
+    /// Paths answered with a redirect to the URL they map to.
+    redirects: Arc<Mutex<HashMap<String, String>>>,
     /// The request and header lines received, oldest first.
     received: Arc<Mutex<Vec<String>>>,
 }
@@ -69,12 +74,14 @@ impl Repository {
         let repository = Self {
             url: format!("http://{}", listener.local_addr().unwrap()),
             artifacts: Arc::default(),
+            redirects: Arc::default(),
             received: Arc::default(),
         };
         for (artifact, versions) in artifacts {
             repository.publish(artifact, versions);
         }
         let served = Arc::clone(&repository.artifacts);
+        let redirects = Arc::clone(&repository.redirects);
         let received = Arc::clone(&repository.received);
         thread::spawn(move || {
             for mut stream in listener.incoming().flatten() {
@@ -95,12 +102,16 @@ impl Repository {
                         })
                     })
                 });
-                let response = match served.lock().unwrap().get(path) {
+                let redirect = redirects.lock().unwrap().get(path).cloned();
+                let response = match (redirect, served.lock().unwrap().get(path)) {
                     _ if !authorized => {
                         "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
                             .to_string()
                     }
-                    Some(versions) => {
+                    (Some(location), _) => format!(
+                        "HTTP/1.1 303 See Other\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    ),
+                    (None, Some(versions)) => {
                         let versions: String = versions
                             .iter()
                             .map(|version| format!("<version>{version}</version>"))
@@ -113,7 +124,7 @@ impl Repository {
                             body.len()
                         )
                     }
-                    None => {
+                    (None, None) => {
                         "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
                             .to_string()
                     }
@@ -129,6 +140,12 @@ impl Repository {
             format!("/{artifact}/maven-metadata.xml"),
             versions.iter().map(|v| v.to_string()).collect(),
         );
+    }
+
+    fn redirect(&self, artifact: &str, to: &Repository) {
+        let path = format!("/{artifact}/maven-metadata.xml");
+        let location = format!("{}{path}", to.url);
+        self.redirects.lock().unwrap().insert(path, location);
     }
 
     fn empty(&self) {
@@ -261,6 +278,17 @@ impl Server {
         .unwrap()
     }
 
+    fn hover(&mut self, uri: &str, line: u32, character: u32) -> Value {
+        self.request(
+            "textDocument/hover",
+            json!({
+                "textDocument": { "uri": uri },
+                "position": { "line": line, "character": character },
+            }),
+        )
+        .unwrap()
+    }
+
     fn labels(&mut self) -> Vec<String> {
         let hints = self.hints(CATALOG_URI);
         let hints = hints.as_array().unwrap();
@@ -328,6 +356,7 @@ fn introduces_itself_and_its_capabilities() {
     assert_eq!(result["capabilities"]["textDocumentSync"], 1);
     assert_eq!(result["capabilities"]["inlayHintProvider"], true);
     assert_eq!(result["capabilities"]["codeActionProvider"], true);
+    assert_eq!(result["capabilities"]["hoverProvider"], true);
 }
 
 #[test]
@@ -392,6 +421,59 @@ fn offers_no_code_action_before_the_versions_are_fetched() {
 }
 
 #[test]
+fn describes_the_modules_of_the_hovered_version() {
+    let mut server = Server::start();
+    let hover = |markdown: &str, range: Value| json!({ "contents": { "kind": "markdown", "value": markdown }, "range": range });
+    // Each module of the shared `kotlin` ref shows its own update, which tells why the hint stops
+    // at 2.1.0. The plugin shows as its id.
+    assert_eq!(
+        server.hover(CATALOG_URI, 1, 12),
+        hover(
+            "`org.jetbrains.kotlin:kotlin-stdlib`: update to 2.2.0\n\n\
+             `org.jetbrains.kotlin.android`: update to 2.1.0",
+            range(1, 10, 1, 16),
+        )
+    );
+    // From the first character of the version to the one after the last.
+    for character in [36, 42] {
+        assert_eq!(
+            server.hover(CATALOG_URI, 5, character),
+            hover(
+                "`com.squareup.okhttp3:okhttp`: update to 4.12.0, newest pre-release 5.0.0-alpha.14",
+                range(5, 36, 5, 42),
+            )
+        );
+    }
+    assert_eq!(
+        server.hover(CATALOG_URI, 6, 66),
+        hover(
+            "`androidx.core:core-ktx`: up to date, newest pre-release 1.14.0-alpha01",
+            range(6, 64, 6, 70),
+        )
+    );
+    assert_eq!(
+        server.hover(CATALOG_URI, 7, 32),
+        hover(
+            "`com.example:missing`: not found in any repository",
+            range(7, 31, 7, 34),
+        )
+    );
+}
+
+#[test]
+fn shows_nothing_outside_the_versions_without_querying_the_repositories() {
+    let first = Repository::new(FIRST_REPOSITORY, None);
+    let second = Repository::new(SECOND_REPOSITORY, None);
+    let mut server = Server::start_with(&[&first, &second], json!({}));
+    // A section, the coordinates and the colon before a version, a `version.ref` alias.
+    for (line, character) in [(0, 3), (5, 20), (5, 35), (4, 75)] {
+        assert_eq!(server.hover(CATALOG_URI, line, character), Value::Null);
+    }
+    assert!(first.received().is_empty());
+    assert!(second.received().is_empty());
+}
+
+#[test]
 fn follows_the_catalog_as_it_is_edited_and_closed() {
     let mut server = Server::start();
     let updated = CATALOG.replace("4.11.0", "4.12.0");
@@ -423,6 +505,7 @@ fn ignores_files_that_are_not_version_catalogs() {
     let uri = "file:///project/gradle/settings.toml";
     server.open(uri, CATALOG);
     assert_eq!(server.hints(uri), json!([]));
+    assert_eq!(server.hover(uri, 1, 12), Value::Null);
 }
 
 #[test]
@@ -430,8 +513,12 @@ fn rejects_unknown_methods_and_invalid_params() {
     let mut server = Server::start();
     let code = |result: Result<Value, ResponseError>| result.unwrap_err().code;
     assert_eq!(
-        code(server.request("textDocument/hover", json!({}))),
+        code(server.request("textDocument/definition", json!({}))),
         -32601
+    );
+    assert_eq!(
+        code(server.request("textDocument/hover", json!({}))),
+        -32602
     );
     assert_eq!(
         code(server.request("textDocument/inlayHint", json!({}))),
@@ -539,6 +626,27 @@ fn queries_the_configured_repositories_before_the_default_ones() {
     let mut server = Server::configured(&[&first, &second], &[], configured);
     // The second repository has okhttp too, up to 4.12.0.
     assert_eq!(server.labels(), ["→ 4.13.0", "→ 1.1", "→ 2.1.0"]);
+}
+
+#[test]
+fn follows_redirects_from_the_configured_repositories_only() {
+    // Like the Plugin Portal, which redirects to Maven Central for the plugins it does not host.
+    let target = Repository::new(
+        &[("com/squareup/okhttp3/okhttp", &["4.11.0", "9.9.9"])],
+        None,
+    );
+    let redirecting = Repository::new(&[], None);
+    redirecting.redirect("com/squareup/okhttp3/okhttp", &target);
+    let first = Repository::new(FIRST_REPOSITORY, None);
+    let second = Repository::new(SECOND_REPOSITORY, None);
+    let mut server = Server::start_with(&[&redirecting, &first, &second], json!({}));
+    assert_eq!(server.labels(), ["→ 4.12.0", "→ 2.1.0"]);
+    assert!(target.received().is_empty());
+    assert_eq!(server.stop(), "");
+
+    let configured = json!([{ "url": redirecting.url }]);
+    let mut server = Server::configured(&[&first, &second], &[], configured);
+    assert_eq!(server.labels(), ["→ 9.9.9", "→ 2.1.0"]);
 }
 
 #[test]

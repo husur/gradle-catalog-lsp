@@ -11,11 +11,10 @@ use ureq::http::Uri;
 
 use crate::catalog::Module;
 
-const DEFAULT_REPOSITORIES: [&str; 3] = [
-    "https://repo1.maven.org/maven2",
-    "https://dl.google.com/dl/android/maven2",
-    "https://plugins.gradle.org/m2",
-];
+const MAVEN_CENTRAL: &str = "https://repo1.maven.org/maven2";
+const GOOGLE_MAVEN: &str = "https://dl.google.com/dl/android/maven2";
+const PLUGIN_PORTAL: &str = "https://plugins.gradle.org/m2";
+const DEFAULT_REPOSITORIES: [&str; 3] = [MAVEN_CENTRAL, GOOGLE_MAVEN, PLUGIN_PORTAL];
 
 pub struct Repository {
     url: String,
@@ -60,7 +59,8 @@ impl Repository {
     }
 }
 
-static REPOSITORIES: OnceLock<Vec<Repository>> = OnceLock::new();
+/// The repositories from the settings, then the default ones.
+static REPOSITORIES: OnceLock<(Vec<Repository>, Vec<Repository>)> = OnceLock::new();
 
 /// Queries the repositories configured in the initialization options first, then the default ones.
 /// The tests serve the metadata from local servers, listed in `GRADLE_CATALOG_LSP_REPOSITORIES`
@@ -79,7 +79,7 @@ pub fn configure(options: Option<&Value>) {
         url,
         authorization: None,
     });
-    let _ = REPOSITORIES.set(configured.chain(defaults).collect());
+    let _ = REPOSITORIES.set((configured.collect(), defaults.collect()));
 }
 
 /// Reads a property the way Gradle does for `credentials(PasswordCredentials)`: from
@@ -110,25 +110,43 @@ static AGENT: LazyLock<ureq::Agent> = LazyLock::new(|| {
         .into()
 });
 
-pub fn fetch(module: &Module) -> Vec<String> {
+/// The URL of the first repository that knows the module, with the versions it lists.
+pub fn fetch(module: &Module) -> Option<(&'static str, Vec<String>)> {
+    let (configured, defaults) = REPOSITORIES.get()?;
     let path = format!(
         "{}/{}/maven-metadata.xml",
         module.group.replace('.', "/"),
         module.name
     );
-    REPOSITORIES
-        .get()
+    // Like Gradle, which resolves plugins on the Plugin Portal first. It hosts the plugins that
+    // have a page there, and redirects to Maven Central for the others.
+    let (portal, others): (Vec<_>, Vec<_>) = defaults
+        .iter()
+        .partition(|repository| module.plugin().is_some() && repository.url == PLUGIN_PORTAL);
+    let configured = configured.iter().map(|repository| (repository, true));
+    let defaults = portal
         .into_iter()
-        .flatten()
-        .find_map(|repository| {
+        .chain(others)
+        .map(|repository| (repository, false));
+    let found = configured
+        .chain(defaults)
+        .find_map(|(repository, follow_redirects)| {
             let url = format!("{}/{path}", repository.url);
             let mut request = AGENT.get(&url);
             if let Some(authorization) = &repository.authorization {
                 request = request.header("Authorization", authorization);
             }
+            // A default repository that redirects does not host the module, which the next ones
+            // answer. A repository from the settings can redirect to the storage of its files.
+            if !follow_redirects {
+                request = request.config().max_redirects(0).build();
+            }
             request
                 .call()
-                .and_then(|mut response| response.body_mut().read_to_string())
+                .and_then(|mut response| {
+                    let metadata = response.body_mut().read_to_string()?;
+                    Ok((!response.status().is_redirection()).then_some(metadata))
+                })
                 // Zed shows stderr in the language server logs. A 404 only means that the module
                 // lives in another repository.
                 .inspect_err(|error| {
@@ -137,13 +155,33 @@ pub fn fetch(module: &Module) -> Vec<String> {
                     }
                 })
                 .ok()
-        })
-        .map(|metadata| {
-            metadata
-                .split("<version>")
-                .skip(1)
-                .filter_map(|tail| Some(tail.split_once("</version>")?.0.trim().to_string()))
-                .collect()
-        })
-        .unwrap_or_default()
+                .flatten()
+                .map(|metadata| (repository.url.as_str(), metadata))
+        });
+    let (repository, metadata) = found?;
+    let versions = metadata
+        .split("<version>")
+        .skip(1)
+        .filter_map(|tail| Some(tail.split_once("</version>")?.0.trim().to_string()))
+        .collect();
+    Some((repository, versions))
+}
+
+/// The page of a version of the module on the website of the default repository it was found in.
+/// A repository from the settings gets none: its URL can be internal, and there is no standard
+/// page layout. Neither does a library found on the Plugin Portal, which only lists its files.
+pub fn page(repository: &str, module: &Module, version: &str) -> Option<String> {
+    let Module { group, name } = module;
+    match (repository, module.plugin()) {
+        (MAVEN_CENTRAL, _) => Some(format!(
+            "https://central.sonatype.com/artifact/{group}/{name}/{version}"
+        )),
+        (GOOGLE_MAVEN, _) => Some(format!(
+            "https://maven.google.com/web/index.html#{group}:{name}:{version}"
+        )),
+        (PLUGIN_PORTAL, Some(id)) => {
+            Some(format!("https://plugins.gradle.org/plugin/{id}/{version}"))
+        }
+        _ => None,
+    }
 }

@@ -1,8 +1,13 @@
-use gradle_catalog_lsp::versions::{compare, latest};
+use gradle_catalog_lsp::versions::{compare, latest, prerelease};
 
 fn latest_of(current: &str, available: &[&str]) -> Option<String> {
     let available: Vec<String> = available.iter().map(|v| v.to_string()).collect();
     latest(current, &available).map(str::to_string)
+}
+
+fn prerelease_of(current: &str, available: &[&str]) -> Option<String> {
+    let available: Vec<String> = available.iter().map(|v| v.to_string()).collect();
+    prerelease(current, &available).map(str::to_string)
 }
 
 #[test]
@@ -58,4 +63,25 @@ fn suggests_the_newest_version_of_the_same_kind() {
     );
     let backport = ["1.9.0", "2.0.0", "1.9.5"];
     assert_eq!(latest_of("1.9.0", &backport).as_deref(), Some("2.0.0"));
+}
+
+#[test]
+fn finds_the_newest_prerelease_of_the_same_flavor() {
+    let lifecycle = ["2.10.0", "2.11.0-rc01", "2.11.0", "2.12.0-alpha05"];
+    assert_eq!(
+        prerelease_of("2.10.0", &lifecycle).as_deref(),
+        Some("2.12.0-alpha05")
+    );
+    assert_eq!(
+        prerelease_of("2.12.0-alpha01", &lifecycle).as_deref(),
+        Some("2.12.0-alpha05")
+    );
+    assert_eq!(prerelease_of("2.12.0-alpha05", &lifecycle), None);
+    assert_eq!(prerelease_of("2.10.0", &["2.10.0", "2.11.0"]), None);
+    let guava = ["33.3.1-android", "33.4.0-android", "34.0.0-rc1-jre"];
+    assert_eq!(prerelease_of("33.3.1-android", &guava), None);
+    assert_eq!(
+        prerelease_of("33.3.1-jre", &guava).as_deref(),
+        Some("34.0.0-rc1-jre")
+    );
 }
