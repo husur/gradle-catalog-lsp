@@ -76,3 +76,29 @@ multiline = { module = "c:d", version = """2.0""" }
 "#;
     assert!(parse(text).is_empty());
 }
+
+#[test]
+fn keeps_the_empty_versions_being_typed() {
+    let text = r#"[versions]
+kotlin = ""
+
+[libraries]
+stdlib = { module = "org.jetbrains.kotlin:kotlin-stdlib", version.ref = "kotlin" }
+core = { group = "androidx.core", name = "core-ktx", version = "" }
+okhttp = "com.squareup.okhttp3:okhttp:"
+"#;
+    let after = |prefix: &str| text.find(prefix).unwrap() + prefix.len();
+    let found: Vec<(String, usize, usize)> = parse(text)
+        .into_iter()
+        .map(|entry| (entry.version, entry.span.start, entry.span.end))
+        .collect();
+    let empty = |offset: usize| (String::new(), offset, offset);
+    assert_eq!(
+        found,
+        [
+            empty(after(r#"version = ""#)),
+            empty(after("okhttp:")),
+            empty(after(r#"kotlin = ""#)),
+        ]
+    );
+}

@@ -17,7 +17,7 @@ const PRERELEASES: [&str; 12] = [
 
 pub fn latest<'a>(current: &str, available: &'a [String]) -> Option<&'a str> {
     let flavor = qualifiers(current);
-    let prerelease = flavor.iter().any(|q| is_prerelease(q));
+    let prerelease = is_prerelease(current);
     newest(current, available, |candidate| {
         prerelease || qualifiers(candidate) == flavor
     })
@@ -27,11 +27,11 @@ pub fn latest<'a>(current: &str, available: &'a [String]) -> Option<&'a str> {
 pub fn prerelease<'a>(current: &str, available: &'a [String]) -> Option<&'a str> {
     let (_, flavor): (Vec<_>, Vec<_>) = qualifiers(current)
         .into_iter()
-        .partition(|q| is_prerelease(q));
+        .partition(|q| prerelease_qualifier(q));
     newest(current, available, |candidate| {
         let (prerelease, other): (Vec<_>, Vec<_>) = qualifiers(candidate)
             .into_iter()
-            .partition(|q| is_prerelease(q));
+            .partition(|q| prerelease_qualifier(q));
         !prerelease.is_empty() && other == flavor
     })
 }
@@ -49,7 +49,11 @@ fn newest<'a>(
         .filter(|newest| compare(newest, current).is_gt())
 }
 
-fn is_prerelease(qualifier: &str) -> bool {
+pub fn is_prerelease(version: &str) -> bool {
+    qualifiers(version).iter().any(|q| prerelease_qualifier(q))
+}
+
+fn prerelease_qualifier(qualifier: &str) -> bool {
     PRERELEASES.contains(&qualifier)
 }
 

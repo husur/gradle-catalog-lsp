@@ -21,6 +21,15 @@ Gradle. For `pom.xml` and other ecosystems, see [Depsy](https://github.com/mpito
 - Or open the code actions on the line and pick **Update to x.y.z**.
 - To apply every update of the catalog at once, pick **Update all N versions** in the same menu.
 
+## Picking a version
+
+To pick another version than the suggested one (to stay on 2.x, go back after a regression or try
+a pre-release), put the cursor in the version and run `editor: show completions` (`ctrl-space`).
+Every version published for its modules is listed, newest first: the one the hint would suggest is
+marked `latest`, pre-releases `pre-release`, and the version you use `current`. For a `version.ref`
+shared by several modules, only the versions that all of them have published are listed. An empty
+version (`""`) gets the list as soon as you type its opening quote.
+
 ## Hovering a version
 
 Hover a version to see the modules it pins (the plugin id for a plugin), each with the update the

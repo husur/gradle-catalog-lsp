@@ -17,7 +17,8 @@ use gradle_catalog_lsp::{repositories, versions};
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, Response};
 use lsp_types::{
     CodeAction, CodeActionKind, CodeActionOrCommand, CodeActionParams,
-    CodeActionProviderCapability, CodeDescription, Diagnostic, DiagnosticOptions,
+    CodeActionProviderCapability, CodeDescription, CompletionItem, CompletionOptions,
+    CompletionParams, CompletionTextEdit, Diagnostic, DiagnosticOptions,
     DiagnosticServerCapabilities, DiagnosticSeverity, DidChangeTextDocumentParams,
     DidCloseTextDocumentParams, DidOpenTextDocumentParams, DocumentDiagnosticParams, Hover,
     HoverContents, HoverParams, HoverProviderCapability, InitializeParams, InitializeResult,
@@ -99,6 +100,11 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             inlay_hint_provider: Some(OneOf::Left(true)),
             code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
             hover_provider: Some(HoverProviderCapability::Simple(true)),
+            // `"` so that an empty version gets the list as soon as it is opened.
+            completion_provider: Some(CompletionOptions {
+                trigger_characters: Some(vec!["\"".to_string()]),
+                ..Default::default()
+            }),
             diagnostic_provider: osv::enabled()
                 .then(|| DiagnosticServerCapabilities::Options(DiagnosticOptions::default())),
             ..Default::default()
@@ -215,11 +221,7 @@ fn handle(
                 position,
             } = params.text_document_position_params;
             let text = documents.get(&text_document.uri).map_or("", String::as_str);
-            let hovered = catalog::parse(text)
-                .into_iter()
-                .map(|entry| (range(text, &entry), entry))
-                .find(|(range, _)| (range.start..=range.end).contains(&position));
-            let Some((range, entry)) = hovered else {
+            let Some((range, entry)) = under(text, pinned(text), position) else {
                 return send(connection, Response::new_ok(id, ()));
             };
             let (sender, cache) = (connection.sender.clone(), cache.clone());
@@ -227,6 +229,26 @@ fn handle(
                 resolve(slice::from_ref(&entry), &cache);
                 let hover = hover(&entry, range, &cache.lock().unwrap());
                 let _ = sender.send(Response::new_ok(id, hover).into());
+            });
+            return;
+        }
+        "textDocument/completion" => {
+            let Ok(params) = from_value::<CompletionParams>(params) else {
+                return invalid(connection, id);
+            };
+            let TextDocumentPositionParams {
+                text_document,
+                position,
+            } = params.text_document_position;
+            let text = documents.get(&text_document.uri).map_or("", String::as_str);
+            let Some((range, entry)) = under(text, catalog::parse(text), position) else {
+                return send(connection, Response::new_ok(id, json!([])));
+            };
+            let (sender, cache) = (connection.sender.clone(), cache.clone());
+            thread::spawn(move || {
+                resolve(slice::from_ref(&entry), &cache);
+                let items = completions(&entry, range, position, &cache.lock().unwrap());
+                let _ = sender.send(Response::new_ok(id, items).into());
             });
             return;
         }
@@ -271,8 +293,22 @@ fn track(documents: &mut HashMap<Uri, String>, notification: Notification) {
     }
 }
 
+/// The entries that pin a version, without the empty ones that only completion fills.
+fn pinned(text: &str) -> Vec<Entry> {
+    let mut entries = catalog::parse(text);
+    entries.retain(|entry| !entry.version.is_empty());
+    entries
+}
+
+fn under(text: &str, entries: Vec<Entry>, position: Position) -> Option<(Range, Entry)> {
+    entries
+        .into_iter()
+        .map(|entry| (range(text, &entry), entry))
+        .find(|(range, _)| (range.start..=range.end).contains(&position))
+}
+
 fn inlay_hints(text: &str, cache: &Cache) -> Vec<InlayHint> {
-    let entries = catalog::parse(text);
+    let entries = pinned(text);
     resolve(&entries, cache);
     let cache = cache.lock().unwrap();
     entries
@@ -339,11 +375,74 @@ fn describe(module: &Module, version: &str, fetched: Option<&Fetched>) -> String
     }
 }
 
+fn completions(
+    entry: &Entry,
+    range: Range,
+    cursor: Position,
+    cache: &HashMap<Module, Fetched>,
+) -> Vec<CompletionItem> {
+    let published: Vec<&[String]> = entry
+        .modules
+        .iter()
+        .filter_map(|module| cache.get(module))
+        .map(|fetched| fetched.versions.as_slice())
+        .filter(|versions| !versions.is_empty())
+        .collect();
+    let Some((first, others)) = published.split_first() else {
+        return vec![];
+    };
+    let mut common: Vec<&String> = first
+        .iter()
+        .filter(|version| others.iter().all(|other| other.contains(version)))
+        .collect();
+    common.sort_by(|a, b| versions::compare(b, a));
+    let latest = update(entry, cache);
+    // Zed filters the items with the letters and digits right before the cursor, the `0` at the end
+    // of `1.13.0`, which would hide or reorder most versions. Starting every filter text with them
+    // keeps the whole list in our order until something is typed.
+    let before: Vec<u16> = entry
+        .version
+        .encode_utf16()
+        .take((cursor.character - range.start.character) as usize)
+        .collect();
+    let before = String::from_utf16_lossy(&before);
+    let word = before
+        .rsplit(|c: char| !c.is_alphanumeric() && c != '_')
+        .next()
+        .unwrap_or_default();
+    common
+        .into_iter()
+        .enumerate()
+        .map(|(index, version)| {
+            let mark = if *version == entry.version {
+                Some("current")
+            } else if Some(version.as_str()) == latest {
+                Some("latest")
+            } else if versions::is_prerelease(version) {
+                Some("pre-release")
+            } else {
+                None
+            };
+            CompletionItem {
+                label: version.clone(),
+                detail: mark.map(str::to_string),
+                sort_text: Some(format!("{index:05}")),
+                filter_text: Some(format!("{word}{version}")),
+                text_edit: Some(CompletionTextEdit::Edit(TextEdit::new(
+                    range,
+                    version.clone(),
+                ))),
+                ..Default::default()
+            }
+        })
+        .collect()
+}
+
 fn diagnostics(text: &str, cache: &Cache, advisories: &Advisories) -> Vec<Diagnostic> {
     if !osv::enabled() {
         return vec![];
     }
-    let entries = catalog::parse(text);
+    let entries = pinned(text);
     resolve(&entries, cache);
     // A module from a repository of the settings stays on the machine, since its coordinates can be
     // confidential. OSV does not track the marker artifacts of plugins.
@@ -442,7 +541,7 @@ fn code_actions(
     };
     let lines = params.range.start.line..=params.range.end.line;
     let cache = cache.lock().unwrap();
-    let edits: Vec<TextEdit> = catalog::parse(text)
+    let edits: Vec<TextEdit> = pinned(text)
         .iter()
         .filter_map(|entry| {
             let latest = update(entry, &cache)?;

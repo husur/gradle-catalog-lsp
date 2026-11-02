@@ -16,6 +16,7 @@ impl Module {
     }
 }
 
+/// A version written in the catalog, possibly empty (`""`) while it is being typed.
 #[derive(Debug, PartialEq)]
 pub struct Entry {
     pub version: String,
@@ -108,7 +109,7 @@ fn entry(text: &str, value: &Value, modules: Vec<Module>) -> Option<Entry> {
     let version = &content[version_start..];
     let dynamic =
         version.starts_with("latest.") || version.contains(['+', '[', ']', '(', ')', ',']);
-    if version.is_empty() || dynamic {
+    if dynamic {
         return None;
     }
     Some(Entry {
